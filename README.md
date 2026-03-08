@@ -459,7 +459,7 @@ openbase.channel('presence-room').track('alice', 'online')
 
 ## Repository Layout
 
-![OpenBase repository layout](docs/assets/openbase-repo-layout.png)
+![OpenBase repository layout](docs/assets/openbase-repo-layout.jpg)
 
 ## Limitations
 
