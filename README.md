@@ -60,6 +60,104 @@ This architecture keeps the control plane local to your server while using Teleg
 
 ## Self-Hosting Quickstart
 
+<details>
+<summary><strong>🤖 Let your AI do it — send this prompt to your AI agent</strong></summary>
+
+```text
+You are setting up OpenBase for me on this machine.
+
+Your job is to complete the full self-hosting setup end to end, asking me only for the environment values you cannot discover yourself.
+
+Follow these rules exactly:
+
+1. First check prerequisites:
+   - Node.js 20+
+   - pnpm
+   - git
+   - optionally Docker / Docker Compose
+
+2. If anything is missing, stop and tell me exactly how to install it on my OS before continuing.
+
+3. Clone the repository:
+   git clone https://github.com/MasterDJ-Crypto/openbase.git
+
+4. Enter the repo and prepare environment files:
+   - copy `.env.example` to `apps/api/.env`
+   - create `apps/dashboard/.env.local`
+
+5. Ask me for each required environment value ONE BY ONE, not all at once.
+   After I answer one, move to the next.
+
+6. When asking for each variable, explain exactly how to get it:
+
+   - `TELEGRAM_API_ID` and `TELEGRAM_API_HASH`
+     Tell me:
+     1. go to `https://my.telegram.org`
+     2. log in with my Telegram account
+     3. click `API development tools`
+     4. create an app
+     5. copy the API ID and API hash
+
+   - `REDIS_URL`
+     Tell me:
+     1. go to `https://upstash.com`
+     2. create a free account
+     3. create a Redis database
+     4. copy the TCP/Redis connection string
+
+   - `JWT_SECRET`
+   - `STORAGE_SECRET`
+   - `MASTER_ENCRYPTION_KEY`
+     Tell me to run this command three separate times and use each output for one variable:
+     node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+   - `RESEND_API_KEY`
+     Tell me:
+     1. go to `https://resend.com`
+     2. create a free account
+     3. create an API key
+
+   - `DASHBOARD_URL`
+     Ask me what domain, hostname, or IP address I am hosting OpenBase on.
+
+7. Once all values are collected, write them into:
+   - `apps/api/.env`
+   - `apps/dashboard/.env.local`
+
+8. Use sensible defaults where appropriate:
+   - `PORT=3001`
+   - `NODE_ENV=production` unless I explicitly say I want development
+   - `SQLITE_BASE_PATH=./data/indexes`
+   - `NEXT_PUBLIC_API_URL` should point to the API URL that matches my `DASHBOARD_URL` setup
+
+9. Then run:
+   - `pnpm install`
+   - `pnpm build`
+
+10. If Docker is available and working, offer to run:
+   - `docker compose up`
+   Otherwise run:
+   - `pnpm start`
+
+11. After startup, verify the deployment by checking:
+   - `http://localhost:3001/health`
+   - `http://localhost:3000`
+
+12. If anything fails, debug it and fix it before stopping.
+
+13. When everything is working, tell me:
+   - that my OpenBase instance is ready
+   - the exact dashboard URL to open
+   - the exact API health URL
+
+Be proactive, do the filesystem edits yourself, and only ask me for missing values one at a time.
+```
+
+</details>
+
+<details>
+<summary><strong>🤓 Do it yourself (for developers)</strong></summary>
+
 ### Prerequisites
 
 - Node.js 20+
@@ -135,6 +233,8 @@ docker compose up -d
 ```
 
 Review [docker-compose.yml](./docker-compose.yml) and your environment values before using it in production.
+
+</details>
 
 ## Environment Variables
 
