@@ -1,9 +1,4 @@
-<h1>
-  <img src="apps/dashboard/src/app/icon.svg" alt="OpenBase logo" width="34" style="vertical-align: middle;" />
-  <span style="vertical-align: middle;">OpenBase</span>
-</h1>
-
-> The free, open-source Supabase alternative powered by Telegram
+![OpenBase banner](docs/assets/openbase-banner.jpg)
 
 ![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)
