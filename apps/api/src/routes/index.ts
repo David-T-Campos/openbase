@@ -1,0 +1,5 @@
+export { registerDatabaseRoutes } from './database.js'
+export { registerAuthRoutes } from './auth.js'
+export { registerStorageRoutes } from './storage.js'
+export { registerProjectRoutes } from './projects.js'
+export { registerPlatformRoutes } from './platform.js'

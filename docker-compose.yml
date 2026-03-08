@@ -1,0 +1,92 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: openbase-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    image: node:20-alpine
+    container_name: openbase-api
+    working_dir: /workspace
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT:-3001}
+      NODE_ENV: ${NODE_ENV:-production}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      SQLITE_BASE_PATH: ${SQLITE_BASE_PATH:-./data/indexes}
+      DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      MOCK_TELEGRAM: ${MOCK_TELEGRAM:-false}
+      SKIP_WARMUP: ${SKIP_WARMUP:-false}
+    command:
+      - sh
+      - -lc
+      - >
+        corepack enable &&
+        pnpm install &&
+        pnpm build &&
+        node apps/api/dist/index.js
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./:/workspace
+      - pnpm_store:/root/.local/share/pnpm/store
+      - api_data:/workspace/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/health > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  dashboard:
+    image: node:20-alpine
+    container_name: openbase-dashboard
+    working_dir: /workspace
+    env_file:
+      - .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001}
+    command:
+      - sh
+      - -lc
+      - >
+        corepack enable &&
+        pnpm install &&
+        pnpm --filter @openbase/dashboard build &&
+        pnpm --filter @openbase/dashboard start --hostname 0.0.0.0 --port 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/workspace
+      - pnpm_store:/root/.local/share/pnpm/store
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/login > /dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  api_data:
+  pnpm_store:
