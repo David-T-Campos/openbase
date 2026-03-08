@@ -56,41 +56,7 @@ This architecture keeps the control plane local to your server while using Teleg
 
 ## Architecture
 
-```text
-                           Clients / Apps / SDK
-                                      |
-                                      v
-                    +-----------------------------------+
-                    |       Dashboard (Next.js)         |
-                    |  login | projects | editor | UI   |
-                    +-------------------+---------------+
-                                        |
-                                        | HTTP / WebSocket
-                                        v
-                    +-----------------------------------+
-                    |          API (Fastify)            |
-                    | database | auth | storage | RT    |
-                    +-------------------+---------------+
-                                        |
-                 +----------------------+----------------------+
-                 |                      |                      |
-                 v                      v                      v
-       +----------------+     +------------------+    +------------------+
-       | Redis          |     | SQLite indexes   |    | Webhook workers  |
-       | cache/state    |     | query acceleration|   | async delivery   |
-       +----------------+     +------------------+    +------------------+
-                                        |
-                                        v
-                    +-----------------------------------+
-                    |  Telegram Storage Provider        |
-                    |  channels = tables/buckets        |
-                    |  messages = rows/manifests        |
-                    |  files = Telegram uploads         |
-                    +-------------------+---------------+
-                                        |
-                                        v
-                             Telegram infrastructure
-```
+![OpenBase architecture](docs/assets/openbase-architecture.png)
 
 ## Self-Hosting Quickstart
 
