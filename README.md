@@ -1,4 +1,7 @@
-# OpenBase
+<h1>
+  <img src="apps/dashboard/src/app/icon.svg" alt="OpenBase logo" width="34" style="vertical-align: middle;" />
+  <span style="vertical-align: middle;">OpenBase</span>
+</h1>
 
 > The free, open-source Supabase alternative powered by Telegram
 
