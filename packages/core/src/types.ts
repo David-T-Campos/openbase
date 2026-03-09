@@ -212,6 +212,10 @@ export interface AuthResult {
         metadata?: Record<string, unknown>
         identities?: UserIdentity[]
         totp_enabled?: boolean
+        confirmed_at?: string | null
+        disabled_at?: string | null
+        disabled_reason?: string | null
+        last_sign_in_at?: string | null
     }
     session: {
         access_token: string
@@ -235,6 +239,7 @@ export interface UserRecord {
     created_at: string
     updated_at: string
     confirmed_at: string | null
+    email_confirmation_sent_at?: string | null
     role: string
     metadata: Record<string, unknown>
     identities: UserIdentity[]
@@ -242,6 +247,11 @@ export interface UserRecord {
     totp_secret_encrypted: string | null
     totp_enabled: boolean
     mfa_enrolled_at: string | null
+    disabled_at?: string | null
+    disabled_reason?: string | null
+    last_sign_in_at?: string | null
+    last_password_reset_at?: string | null
+    last_session_revoked_at?: string | null
 }
 
 // ─── Project Types ───────────────────────────────────────────
@@ -270,6 +280,59 @@ export interface WebhookConfig {
 }
 
 /** A project with all its configuration */
+export type ProjectPermission =
+    | 'project.read'
+    | 'project.delete'
+    | 'tables.read'
+    | 'tables.write'
+    | 'tables.manage'
+    | 'storage.read'
+    | 'storage.write'
+    | 'storage.manage'
+    | 'auth.read'
+    | 'auth.manage'
+    | 'webhooks.read'
+    | 'webhooks.manage'
+    | 'migrations.read'
+    | 'migrations.manage'
+    | 'logs.read'
+    | 'audit.read'
+    | 'settings.read'
+    | 'settings.manage'
+    | 'members.read'
+    | 'members.manage'
+    | 'roles.read'
+    | 'roles.manage'
+
+export interface ProjectRoleDefinition {
+    key: string
+    name: string
+    description?: string
+    permissions: ProjectPermission[]
+    system?: boolean
+}
+
+export interface ProjectMember {
+    userId: string
+    email: string
+    roleKey: string
+    addedAt: string
+    addedBy: string
+}
+
+export interface ProjectInvitation {
+    id: string
+    token: string
+    projectId: string
+    email: string
+    roleKey: string
+    invitedBy: string
+    createdAt: string
+    expiresAt: string
+    acceptedAt?: string | null
+    revokedAt?: string | null
+}
+
 export interface Project {
     id: string
     name: string
@@ -283,6 +346,8 @@ export interface Project {
     usersChannel: TelegramChannelRef
     schemaChannel: TelegramChannelRef
     commitLogChannel: TelegramChannelRef
+    roles?: Record<string, ProjectRoleDefinition>
+    members?: Record<string, ProjectMember>
     status: ProjectStatus
     warmupDaysRemaining?: number
     anonKey: string

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
+import { setProjectAuthSession } from '../../../lib/platformApi'
 
 export function CallbackContent() {
     const router = useRouter()
@@ -17,6 +18,32 @@ export function CallbackContent() {
         if (token && type === 'magiclink' && projectId) {
             const redirectTo = `${window.location.origin}/auth/callback`
             window.location.href = `${apiUrl}/api/v1/${projectId}/auth/callback?token=${encodeURIComponent(token)}&type=magiclink&redirectTo=${encodeURIComponent(redirectTo)}`
+            return
+        }
+
+        if (token && type === 'email_confirmation' && projectId) {
+            setMessage('Confirming your email...')
+            fetch(`${apiUrl}/api/v1/${projectId}/auth/confirm`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token }),
+            })
+                .then(async response => {
+                    const payload = await response.json() as { data?: { session?: { access_token: string; refresh_token?: string } }; error?: { message?: string } }
+                    if (!response.ok || payload.error) {
+                        throw new Error(payload.error?.message || 'Email confirmation failed')
+                    }
+
+                    if (payload.data?.session) {
+                        setProjectAuthSession(projectId, payload.data.session)
+                    }
+
+                    setMessage('Email confirmed. Redirecting to the auth dashboard...')
+                    router.replace(`/dashboard/${projectId}/auth`)
+                })
+                .catch(error => {
+                    setMessage((error as Error).message)
+                })
             return
         }
 

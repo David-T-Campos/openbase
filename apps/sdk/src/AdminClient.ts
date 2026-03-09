@@ -1,6 +1,10 @@
 import {
+    authUserSchema,
     migrationDefinitionSchema,
     migrationHistoryEntrySchema,
+    projectInvitationSchema,
+    projectMemberSchema,
+    projectRoleDefinitionSchema,
     schemaExportSchema,
 } from '@openbase/core'
 import { z } from 'zod'
@@ -18,6 +22,22 @@ const migrationListSchema = z.object({
 const migrationMutationSchema = migrationDefinitionSchema.extend({
     checksum: z.string().optional(),
     source: z.enum(['cli', 'dashboard', 'sdk']).optional(),
+})
+
+const memberWithRoleSchema = projectMemberSchema.extend({
+    role: projectRoleDefinitionSchema,
+    owner: z.boolean().optional(),
+})
+
+const invitationWithUrlSchema = projectInvitationSchema.extend({
+    inviteUrl: z.string().url(),
+    delivery: z.enum(['email', 'manual']),
+})
+
+const updateUserSchema = authUserSchema
+
+const messageSchema = z.object({
+    message: z.string(),
 })
 
 export class OpenBaseAdminClient {
@@ -55,6 +75,66 @@ export class OpenBaseAdminClient {
                 })
             ),
         },
+        auth: {
+            listUsers: async () => this.request('GET', '/auth/users', z.array(authUserSchema)),
+            createUser: async (payload: { email: string; password: string; metadata?: Record<string, unknown> }) => this.request(
+                'POST',
+                '/auth/users',
+                authUserSchema,
+                z.object({
+                    email: z.string().email(),
+                    password: z.string().min(8),
+                    metadata: z.record(z.unknown()).optional(),
+                }).parse(payload)
+            ),
+            confirmUser: async (userId: string) => this.request('POST', `/auth/users/${userId}/confirm`, updateUserSchema),
+            toggleUserDisabled: async (userId: string, payload: { disabled: boolean; reason?: string }) => this.request(
+                'PATCH',
+                `/auth/users/${userId}`,
+                updateUserSchema,
+                z.object({
+                    disabled: z.boolean(),
+                    reason: z.string().optional(),
+                }).parse(payload)
+            ),
+            revokeSessions: async (userId: string) => this.request('POST', `/auth/users/${userId}/revoke-sessions`, messageSchema),
+            sendPasswordReset: async (userId: string) => this.request('POST', `/auth/users/${userId}/password-reset`, messageSchema),
+            disableTotp: async (userId: string) => this.request('POST', `/auth/users/${userId}/mfa/totp/disable`, authUserSchema),
+            deleteUser: async (userId: string) => this.request('DELETE', `/auth/users/${userId}`, messageSchema),
+        },
+        access: {
+            listRoles: async () => this.requestProjectControl('GET', '/access/roles', z.array(projectRoleDefinitionSchema)),
+            saveRole: async (payload: z.infer<typeof projectRoleDefinitionSchema>) => this.requestProjectControl(
+                'POST',
+                '/access/roles',
+                projectRoleDefinitionSchema,
+                projectRoleDefinitionSchema.parse(payload)
+            ),
+            deleteRole: async (roleKey: string) => this.requestProjectControl('DELETE', `/access/roles/${roleKey}`, messageSchema),
+            listMembers: async () => this.requestProjectControl('GET', '/access/members', z.array(memberWithRoleSchema)),
+            updateMemberRole: async (userId: string, roleKey: string) => this.requestProjectControl(
+                'PATCH',
+                `/access/members/${userId}`,
+                projectMemberSchema,
+                z.object({ roleKey: z.string().min(1) }).parse({ roleKey })
+            ),
+            removeMember: async (userId: string) => this.requestProjectControl('DELETE', `/access/members/${userId}`, messageSchema),
+            listInvitations: async () => this.requestProjectControl('GET', '/access/invitations', z.array(projectInvitationSchema)),
+            inviteMember: async (payload: { email: string; roleKey: string }) => this.requestProjectControl(
+                'POST',
+                '/access/invitations',
+                invitationWithUrlSchema,
+                z.object({
+                    email: z.string().email(),
+                    roleKey: z.string().min(1),
+                }).parse(payload)
+            ),
+            revokeInvitation: async (invitationId: string) => this.requestProjectControl(
+                'DELETE',
+                `/access/invitations/${invitationId}`,
+                projectInvitationSchema
+            ),
+        },
     }
 
     constructor(projectUrl: string, serviceRoleKey: string) {
@@ -85,7 +165,7 @@ export class OpenBaseAdminClient {
     }
 
     private async request<TSchema extends z.ZodTypeAny>(
-        method: 'GET' | 'POST',
+        method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
         path: string,
         schema: TSchema,
         body?: unknown
@@ -93,6 +173,37 @@ export class OpenBaseAdminClient {
         try {
             const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
             const response = await fetchFn(`${this.projectUrl}/api/v1/${this.projectId}${path}`, {
+                method,
+                headers: {
+                    apikey: this.apiKey,
+                    Authorization: `Bearer ${this.apiKey}`,
+                    ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+                },
+                body: body !== undefined ? JSON.stringify(body) : undefined,
+            })
+
+            const result = await parseApiEnvelope(response, schema)
+            return {
+                data: result.data,
+                error: result.error ? { message: result.error.message } : null,
+            }
+        } catch (error) {
+            return {
+                data: null,
+                error: { message: (error as Error).message },
+            }
+        }
+    }
+
+    private async requestProjectControl<TSchema extends z.ZodTypeAny>(
+        method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
+        path: string,
+        schema: TSchema,
+        body?: unknown
+    ): Promise<{ data: z.infer<TSchema> | null; error: { message: string } | null }> {
+        try {
+            const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
+            const response = await fetchFn(`${this.projectUrl}/api/v1/projects/${this.projectId}${path}`, {
                 method,
                 headers: {
                     apikey: this.apiKey,

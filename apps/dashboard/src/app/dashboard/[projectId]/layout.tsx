@@ -8,11 +8,13 @@ import {
     ArrowLeft,
     Database,
     FileCode2,
+    Fingerprint,
     FolderOpen,
     LayoutDashboard,
     ScrollText,
     Settings,
     Shield,
+    Users2,
 } from 'lucide-react'
 import { AppLogo } from '../../../components/AppLogo'
 import { authenticatedFetch, hasPlatformSession } from '../../../lib/platformApi'
@@ -23,17 +25,22 @@ interface Project {
     status: 'warming_up' | 'active' | 'suspended' | 'warmup_failed'
     channelMap: Record<string, { id: string; accessHash: string }>
     buckets: Record<string, { id: string; accessHash: string }>
+    access?: {
+        permissions: string[]
+    }
 }
 
 const navItems = [
-    { label: 'Overview', path: '', icon: LayoutDashboard },
-    { label: 'Table editor', path: '/editor', icon: Database },
-    { label: 'Migrations', path: '/migrations', icon: FileCode2 },
-    { label: 'Auth', path: '/auth', icon: Shield },
-    { label: 'Storage', path: '/storage', icon: FolderOpen },
-    { label: 'Realtime', path: '/realtime', icon: Activity },
-    { label: 'Settings', path: '/settings', icon: Settings },
-    { label: 'Logs', path: '/logs', icon: ScrollText },
+    { label: 'Overview', path: '', icon: LayoutDashboard, permission: 'project.read' },
+    { label: 'Table editor', path: '/editor', icon: Database, permission: 'tables.read' },
+    { label: 'Migrations', path: '/migrations', icon: FileCode2, permission: 'migrations.read' },
+    { label: 'Auth', path: '/auth', icon: Shield, permission: 'auth.read' },
+    { label: 'Team', path: '/team', icon: Users2, permission: 'members.read' },
+    { label: 'Storage', path: '/storage', icon: FolderOpen, permission: 'storage.read' },
+    { label: 'Realtime', path: '/realtime', icon: Activity, permission: 'tables.read' },
+    { label: 'Audit', path: '/audit', icon: Fingerprint, permission: 'audit.read' },
+    { label: 'Settings', path: '/settings', icon: Settings, permission: 'settings.read' },
+    { label: 'Logs', path: '/logs', icon: ScrollText, permission: 'logs.read' },
 ]
 
 const statusTone: Record<Project['status'], string> = {
@@ -49,6 +56,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
     const router = useRouter()
     const projectId = params.projectId as string
     const [project, setProject] = useState<Project | null>(null)
+    const visibleNavItems = navItems.filter(item => !project?.access?.permissions || project.access.permissions.includes(item.permission))
 
     useEffect(() => {
         if (!hasPlatformSession()) {
@@ -87,7 +95,7 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
                 </div>
 
                 <nav className="flex gap-2 overflow-x-auto px-5 pb-5 lg:block lg:space-y-1 lg:overflow-visible">
-                    {navItems.map(item => {
+                    {visibleNavItems.map(item => {
                         const href = `/dashboard/${projectId}${item.path}`
                         const isActive = pathname === href || (item.path === '' && pathname === `/dashboard/${projectId}`)
                         const Icon = item.icon

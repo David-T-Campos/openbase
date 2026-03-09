@@ -3,6 +3,7 @@ import helmet from '@fastify/helmet'
 import multipart from '@fastify/multipart'
 import Fastify from 'fastify'
 import Redis from 'ioredis'
+import { ProjectAccessService } from './access/index.js'
 import { AuthService } from './auth/index.js'
 import type { Config } from './config.js'
 import { loadConfig } from './config.js'
@@ -48,6 +49,7 @@ export interface AppContext {
     config: Config
     redis: Redis
     projectService: ProjectService
+    projectAccessService: ProjectAccessService
     requestLogService: RequestLogService
     operationsLogService: OperationsLogService
     webhookService: WebhookService
@@ -173,6 +175,28 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         inlineProcessing: options.webhookInlineProcessing ?? config.NODE_ENV === 'test',
         operationsLogService,
     })
+    const sendEmail = async (to: string, subject: string, html: string): Promise<void> => {
+        if (!config.RESEND_API_KEY || !config.RESEND_FROM_EMAIL) {
+            throw new Error('Magic link email delivery is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL.')
+        }
+
+        const { Resend } = await import('resend')
+        const resend = new Resend(config.RESEND_API_KEY)
+        await resend.emails.send({
+            from: config.RESEND_FROM_EMAIL,
+            to,
+            subject,
+            html,
+        })
+    }
+    const projectAccessService = new ProjectAccessService(
+        redis,
+        projectService,
+        platformUserRepository,
+        operationsLogService,
+        config.DASHBOARD_URL,
+        sendEmail
+    )
 
     const indexManagers = new Map<string, IndexManager>()
     function getIndexManager(projectId: string): IndexManager {
@@ -248,32 +272,19 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         }).catch(() => undefined)
     })
 
-    const sendEmail = async (to: string, subject: string, html: string): Promise<void> => {
-        if (!config.RESEND_API_KEY || !config.RESEND_FROM_EMAIL) {
-            throw new Error('Magic link email delivery is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL.')
-        }
-
-        const { Resend } = await import('resend')
-        const resend = new Resend(config.RESEND_API_KEY)
-        await resend.emails.send({
-            from: config.RESEND_FROM_EMAIL,
-            to,
-            subject,
-            html,
-        })
-    }
-
     await warmupService.reconcileWarmups()
     const realtimeBridge = new TelegramRealtimeBridge(sessionPool, projectService, realtimeService)
     await realtimeBridge.start()
 
-    registerDatabaseRoutes(app, projectService, getIndexManager, encryptionService, masterKey, realtimeService, webhookService)
-    registerMigrationRoutes(app, projectService, migrationService)
+    registerDatabaseRoutes(app, projectService, projectAccessService, authService, getIndexManager, encryptionService, masterKey, realtimeService, webhookService)
+    registerMigrationRoutes(app, projectService, projectAccessService, authService, migrationService)
     registerAuthRoutes(
         app,
         redis,
         authService,
         projectService,
+        projectAccessService,
+        operationsLogService,
         getIndexManager,
         sendEmail,
         config.DASHBOARD_URL,
@@ -291,8 +302,8 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
             },
         }
     )
-    registerStorageRoutes(app, storageService, projectService)
-    registerProjectRoutes(app, projectService, warmupService, requestLogService, webhookService, operationsLogService, sessionPool)
+    registerStorageRoutes(app, storageService, projectService, projectAccessService, authService)
+    registerProjectRoutes(app, projectService, projectAccessService, warmupService, requestLogService, webhookService, operationsLogService, sessionPool)
     registerPlatformRoutes(
         app,
         redis,
@@ -318,6 +329,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         config,
         redis,
         projectService,
+        projectAccessService,
         requestLogService,
         operationsLogService,
         webhookService,

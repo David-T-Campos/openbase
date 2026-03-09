@@ -23,6 +23,10 @@ export interface AuthResult {
             linkedAt: string
         }>
         totp_enabled?: boolean
+        confirmed_at?: string | null
+        disabled_at?: string | null
+        disabled_reason?: string | null
+        last_sign_in_at?: string | null
     }
     session: {
         access_token: string

@@ -82,6 +82,8 @@ export class ProjectService {
                 usersChannel: reservedChannels.usersChannel,
                 schemaChannel: reservedChannels.schemaChannel,
                 commitLogChannel: reservedChannels.commitLogChannel,
+                roles: {},
+                members: {},
                 status: this.skipWarmup ? 'active' : 'warming_up',
                 warmupDaysRemaining: this.skipWarmup ? 0 : 7,
                 anonKey,

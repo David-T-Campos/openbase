@@ -1,15 +1,24 @@
 'use client'
 
-import { useState } from 'react'
+import { Suspense, useState } from 'react'
 import Link from 'next/link'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { ArrowLeft, ArrowRight, KeyRound, ShieldCheck } from 'lucide-react'
 import { authResultSchema } from '@openbase/core'
 import { AppLogo } from '../../components/AppLogo'
 import { readApiEnvelope, setPlatformSession } from '../../lib/platformApi'
 
 export default function LoginPage() {
+    return (
+        <Suspense fallback={<LoginFallback />}>
+            <LoginContent />
+        </Suspense>
+    )
+}
+
+function LoginContent() {
     const router = useRouter()
+    const searchParams = useSearchParams()
     const [isSignUp, setIsSignUp] = useState(false)
     const [email, setEmail] = useState('')
     const [password, setPassword] = useState('')
@@ -32,7 +41,8 @@ export default function LoginPage() {
 
             const result = await readApiEnvelope(res, authResultSchema)
             setPlatformSession(result.session)
-            router.push('/dashboard')
+            const inviteToken = searchParams.get('invite')
+            router.push(inviteToken ? `/invite?token=${encodeURIComponent(inviteToken)}` : '/dashboard')
         } catch (err) {
             setError((err as Error).message)
         } finally {
@@ -151,6 +161,19 @@ export default function LoginPage() {
                             {isSignUp ? 'Sign in' : 'Create one'}
                         </button>
                     </div>
+                </div>
+            </section>
+        </div>
+    )
+}
+
+function LoginFallback() {
+    return (
+        <div className="auth-shell">
+            <section className="panel flex items-center justify-center p-8">
+                <div className="text-center">
+                    <div className="text-2xl font-semibold text-white">Loading sign-in</div>
+                    <p className="mt-3 text-sm subtle">Preparing the platform session flow.</p>
                 </div>
             </section>
         </div>

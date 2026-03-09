@@ -1,11 +1,13 @@
 import { randomUUID } from 'crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type Redis from 'ioredis'
-import { ForbiddenError } from '@openbase/core'
 import { z } from 'zod'
+import type { ProjectAccessService } from '../access/ProjectAccessService.js'
+import { assertRouteProjectPermission, assertRouteProjectUser } from '../access/routePermissions.js'
 import type { AuthService } from '../auth/AuthService.js'
 import type { IndexManager } from '../database/IndexManager.js'
 import { authMiddleware } from '../middleware/auth.js'
+import type { OperationsLogService } from '../ops/OperationsLogService.js'
 import type { ProjectService } from '../projects/ProjectService.js'
 
 const ACCESS_TOKEN_COOKIE = 'openbase_access_token'
@@ -20,6 +22,8 @@ const signUpSchema = z.object({
     metadata: z.record(z.unknown()).optional(),
 })
 
+const adminCreateUserSchema = signUpSchema
+
 const signInSchema = z.object({
     email: z.string().email(),
     password: z.string().min(1),
@@ -28,6 +32,19 @@ const signInSchema = z.object({
 
 const magicLinkSchema = z.object({
     email: z.string().email(),
+})
+
+const emailConfirmationSchema = z.object({
+    token: z.string().min(1),
+})
+
+const passwordResetRequestSchema = z.object({
+    email: z.string().email(),
+})
+
+const passwordResetSchema = z.object({
+    token: z.string().min(1),
+    password: z.string().min(8),
 })
 
 const refreshSchema = z.object({
@@ -48,6 +65,11 @@ const totpChallengeSchema = z.object({
     code: z.string().min(6),
 })
 
+const updateUserSchema = z.object({
+    disabled: z.boolean().optional(),
+    reason: z.string().max(280).optional(),
+})
+
 interface OAuthConfig {
     google: { enabled: boolean; clientId?: string; clientSecret?: string }
     github: { enabled: boolean; clientId?: string; clientSecret?: string }
@@ -58,6 +80,8 @@ export function registerAuthRoutes(
     redis: Redis,
     authService: AuthService,
     projectService: ProjectService,
+    projectAccessService: ProjectAccessService,
+    operationsLogService: OperationsLogService,
     getIndexManager: (projectId: string) => IndexManager,
     sendEmail: (to: string, subject: string, html: string) => Promise<void>,
     dashboardUrl: string,
@@ -71,17 +95,139 @@ export function registerAuthRoutes(
             const body = signUpSchema.parse(request.body)
 
             return projectService.withProjectStorage(projectId, async (project, provider) => {
-                const result = await authService.signUp(
-                    project.id,
+                if (process.env.NODE_ENV !== 'production') {
+                    const result = await authService.signUp(
+                        project.id,
+                        project.usersChannel,
+                        body.email,
+                        body.password,
+                        provider,
+                        getIndexManager(project.id),
+                        body.metadata
+                    )
+
+                    await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Auth user signed up', {
+                        action: 'auth.signup',
+                        userId: result.user.id,
+                        email: result.user.email,
+                        mode: 'development-auto-confirm',
+                    })
+
+                    return reply.status(201).send({ data: result })
+                }
+
+                const result = await authService.registerUser(
                     project.usersChannel,
                     body.email,
                     body.password,
                     provider,
                     getIndexManager(project.id),
-                    body.metadata
+                    body.metadata,
+                    { autoConfirm: false }
                 )
 
-                return reply.status(201).send({ data: result })
+                try {
+                    await authService.sendEmailConfirmation(body.email, project.id, sendEmail, dashboardUrl)
+                } catch (error) {
+                    await authService.deleteUser(
+                        project.id,
+                        project.usersChannel,
+                        result.user.id,
+                        provider,
+                        getIndexManager(project.id)
+                    ).catch(() => undefined)
+
+                    return reply.status(503).send({
+                        error: {
+                            message: (error as Error).message || 'Email confirmation delivery is not configured',
+                            code: 'EMAIL_CONFIRMATION_NOT_CONFIGURED',
+                        },
+                    })
+                }
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'info', 'Auth signup pending confirmation', {
+                    action: 'auth.signup.pending_confirmation',
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
+
+                return reply.status(201).send({
+                    data: {
+                        user: result.user,
+                        confirmation_required: true,
+                    },
+                })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/auth/confirm',
+        async (request, reply) => {
+            const body = emailConfirmationSchema.parse(request.body)
+            return projectService.withProjectStorage(request.params.projectId, async (project, provider) => {
+                const result = await authService.confirmEmail(
+                    body.token,
+                    project.usersChannel,
+                    provider,
+                    getIndexManager(project.id)
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Auth email confirmed', {
+                    action: 'auth.confirm',
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
+
+                return reply.send({ data: result })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/auth/password-reset/request',
+        async (request, reply) => {
+            const body = passwordResetRequestSchema.parse(request.body)
+            try {
+                await authService.requestPasswordReset(body.email, request.params.projectId, sendEmail, dashboardUrl)
+            } catch (error) {
+                return reply.status(503).send({
+                    error: {
+                        message: (error as Error).message || 'Password reset email delivery is not configured',
+                        code: 'PASSWORD_RESET_NOT_CONFIGURED',
+                    },
+                })
+            }
+
+            await recordProjectSecurityEvent(operationsLogService, request.params.projectId, 'info', 'Password reset requested', {
+                action: 'auth.password_reset.request',
+                email: body.email,
+            })
+
+            return reply.send({ data: { message: 'Password reset sent' } })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/auth/password-reset/confirm',
+        async (request, reply) => {
+            const body = passwordResetSchema.parse(request.body)
+            return projectService.withProjectStorage(request.params.projectId, async (project, provider) => {
+                const result = await authService.resetPassword(
+                    body.token,
+                    body.password,
+                    project.usersChannel,
+                    provider,
+                    getIndexManager(project.id)
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Password reset completed', {
+                    action: 'auth.password_reset.confirm',
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
+
+                return reply.send({ data: result })
             })
         }
     )
@@ -104,6 +250,11 @@ export function registerAuthRoutes(
                 )
 
                 if ('mfaRequired' in result) {
+                    await recordProjectSecurityEvent(operationsLogService, project.id, 'info', 'Auth MFA challenge issued', {
+                        action: 'auth.mfa.challenge',
+                        userId: result.user.id,
+                        email: result.user.email,
+                    })
                     return reply.send({
                         data: {
                         mfa_required: true,
@@ -112,6 +263,12 @@ export function registerAuthRoutes(
                         },
                     })
                 }
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Auth user signed in', {
+                    action: 'auth.signin',
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
 
                 return reply.send({ data: result })
             })
@@ -127,6 +284,10 @@ export function registerAuthRoutes(
             if (refreshToken) {
                 await authService.signOut(refreshToken)
             }
+
+            await recordProjectSecurityEvent(operationsLogService, request.params.projectId, 'info', 'Auth session signed out', {
+                action: 'auth.signout',
+            })
 
             clearProjectAuthCookies(reply, request.params.projectId, apiPublicUrl)
             return reply.send({ data: { message: 'Signed out' } })
@@ -156,6 +317,11 @@ export function registerAuthRoutes(
                 })
             }
 
+            await recordProjectSecurityEvent(operationsLogService, projectId, 'info', 'Magic link issued', {
+                action: 'auth.magic_link.send',
+                email: body.email,
+            })
+
             return reply.send({ data: { message: 'Magic link sent' } })
         }
     )
@@ -174,6 +340,10 @@ export function registerAuthRoutes(
             if (getCookieValue(request, REFRESH_TOKEN_COOKIE) || getCookieValue(request, ACCESS_TOKEN_COOKIE)) {
                 setProjectAuthCookies(reply, request.params.projectId, apiPublicUrl, session)
             }
+
+            await recordProjectSecurityEvent(operationsLogService, request.params.projectId, 'success', 'Auth session refreshed', {
+                action: 'auth.refresh',
+            })
 
             return reply.send({ data: { session } })
         }
@@ -207,6 +377,11 @@ export function registerAuthRoutes(
                 )
 
                 setProjectAuthCookies(reply, project.id, apiPublicUrl, result.session)
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Magic link verified', {
+                    action: 'auth.magic_link.verify',
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
                 return reply.redirect(buildProjectAuthRedirect(trustedRedirect, project.id))
             })
         }
@@ -216,7 +391,9 @@ export function registerAuthRoutes(
         '/api/v1/:projectId/auth/providers',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            await assertProjectAccess(projectService, request)
+            await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.read',
+            })
 
             return reply.send({
                 data: [
@@ -331,6 +508,12 @@ export function registerAuthRoutes(
                 )
 
                 setProjectAuthCookies(reply, project.id, apiPublicUrl, result.session)
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'OAuth sign-in completed', {
+                    action: 'auth.oauth.signin',
+                    provider,
+                    userId: result.user.id,
+                    email: result.user.email,
+                })
                 return reply.redirect(buildProjectAuthRedirect(trustedRedirect, project.id))
             })
         }
@@ -340,10 +523,7 @@ export function registerAuthRoutes(
         '/api/v1/:projectId/auth/mfa/totp/enroll',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAccess(projectService, request)
-            if (!request.user?.sub || request.user.projectId !== project.id) {
-                throw new ForbiddenError('A project user session is required')
-            }
+            const project = await assertRouteProjectUser(projectService, projectAccessService, authService, request)
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const { enrollmentToken, secret, uri } = await authService.beginTotpEnrollment(
@@ -354,6 +534,11 @@ export function registerAuthRoutes(
                     getIndexManager(project.id)
                 )
 
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'info', 'MFA enrollment started', {
+                    action: 'auth.mfa.enroll.start',
+                    userId: request.user!.sub!,
+                })
+
                 return reply.send({ data: { enrollment_token: enrollmentToken, secret, uri } })
             })
         }
@@ -363,7 +548,7 @@ export function registerAuthRoutes(
         '/api/v1/:projectId/auth/mfa/totp/verify',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectUser(projectService, projectAccessService, authService, request)
             const body = totpVerifySchema.parse(request.body)
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
@@ -375,6 +560,11 @@ export function registerAuthRoutes(
                     getIndexManager(project.id)
                 )
 
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'MFA enrollment verified', {
+                    action: 'auth.mfa.enroll.verify',
+                    userId: request.user!.sub!,
+                })
+
                 return reply.send({ data: { enabled: true } })
             })
         }
@@ -385,6 +575,9 @@ export function registerAuthRoutes(
         async (request, reply) => {
             const body = totpChallengeSchema.parse(request.body)
             const session = await authService.verifyTotpChallenge(body.challenge_token, body.code)
+            await recordProjectSecurityEvent(operationsLogService, request.params.projectId, 'success', 'MFA challenge completed', {
+                action: 'auth.mfa.challenge.verify',
+            })
             return reply.send({ data: { session } })
         }
     )
@@ -393,11 +586,7 @@ export function registerAuthRoutes(
         '/api/v1/:projectId/auth/user',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAccess(projectService, request)
-
-            if (!request.user?.sub || request.user.projectId !== project.id) {
-                throw new ForbiddenError('A project user session is required')
-            }
+            const project = await assertRouteProjectUser(projectService, projectAccessService, authService, request)
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const user = await authService.getUser(
@@ -420,7 +609,10 @@ export function registerAuthRoutes(
         '/api/v1/:projectId/auth/users',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAdminAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.read',
+                allowProjectUsers: false,
+            })
 
             return projectService.withProjectStorageRecord(project, async (_project, provider) => {
                 const users = await authService.listUsers(
@@ -433,41 +625,255 @@ export function registerAuthRoutes(
             })
         }
     )
-}
 
-async function assertProjectAccess(
-    projectService: ProjectService,
-    request: FastifyRequest<{ Params: Record<string, string> }>
-) {
-    const project = await projectService.getProject(request.params.projectId)
-    const user = request.user
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/auth/users',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+            const body = adminCreateUserSchema.parse(request.body)
 
-    if (!user) {
-        throw new ForbiddenError('Authentication required')
-    }
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.createManagedUser(
+                    project.usersChannel,
+                    body.email,
+                    body.password,
+                    provider,
+                    getIndexManager(project.id),
+                    body.metadata
+                )
 
-    if (user.role === 'platform_user' && user.sub === project.ownerId) {
-        return project
-    }
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Auth user created by admin', {
+                    action: 'auth.admin.create_user',
+                    userId: user.id,
+                    email: user.email,
+                    actorUserId: request.user!.sub,
+                })
 
-    if (user.projectId === project.id) {
-        return project
-    }
+                return reply.status(201).send({ data: user })
+            })
+        }
+    )
 
-    throw new ForbiddenError('You do not have access to this project')
-}
+    app.patch<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+            const body = updateUserSchema.parse(request.body)
 
-async function assertProjectAdminAccess(
-    projectService: ProjectService,
-    request: FastifyRequest<{ Params: Record<string, string> }>
-) {
-    const project = await assertProjectAccess(projectService, request)
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.updateUserState(
+                    project.id,
+                    project.usersChannel,
+                    request.params.userId,
+                    provider,
+                    getIndexManager(project.id),
+                    {
+                        disabled_at: body.disabled ? new Date().toISOString() : body.disabled === false ? null : undefined,
+                        disabled_reason: body.disabled ? body.reason || 'Disabled by project administrator' : body.disabled === false ? null : undefined,
+                    }
+                )
 
-    if (request.user?.role === 'platform_user' || request.user?.role === 'service_role') {
-        return project
-    }
+                await recordProjectSecurityEvent(operationsLogService, project.id, body.disabled ? 'warning' : 'success', 'Auth user state updated', {
+                    action: body.disabled ? 'auth.admin.disable_user' : 'auth.admin.enable_user',
+                    userId: request.params.userId,
+                    actorUserId: request.user!.sub,
+                })
 
-    throw new ForbiddenError('Administrative access required')
+                return reply.send({ data: user })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId/confirm',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.updateUserState(
+                    project.id,
+                    project.usersChannel,
+                    request.params.userId,
+                    provider,
+                    getIndexManager(project.id),
+                    { confirmed_at: new Date().toISOString() }
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'success', 'Auth user confirmed by admin', {
+                    action: 'auth.admin.confirm_user',
+                    userId: request.params.userId,
+                    actorUserId: request.user!.sub,
+                })
+
+                return reply.send({ data: user })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId/revoke-sessions',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+            await authService.revokeUserSessions(request.params.projectId, request.params.userId)
+            await recordProjectSecurityEvent(operationsLogService, request.params.projectId, 'warning', 'Auth user sessions revoked', {
+                action: 'auth.admin.revoke_sessions',
+                userId: request.params.userId,
+                actorUserId: request.user!.sub,
+            })
+            return reply.send({ data: { message: 'Sessions revoked' } })
+        }
+    )
+
+    app.post<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId/password-reset',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.getUser(
+                    project.usersChannel,
+                    request.params.userId,
+                    provider,
+                    getIndexManager(project.id)
+                )
+
+                if (!user) {
+                    return reply.status(404).send({ error: { message: 'User not found' } })
+                }
+
+                try {
+                    await authService.requestPasswordReset(user.email, project.id, sendEmail, dashboardUrl)
+                } catch (error) {
+                    return reply.status(503).send({
+                        error: {
+                            message: (error as Error).message || 'Password reset email delivery is not configured',
+                            code: 'PASSWORD_RESET_NOT_CONFIGURED',
+                        },
+                    })
+                }
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'info', 'Admin-triggered password reset issued', {
+                    action: 'auth.admin.password_reset',
+                    userId: request.params.userId,
+                    email: user.email,
+                    actorUserId: request.user!.sub,
+                })
+
+                return reply.send({ data: { message: 'Password reset sent' } })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/:projectId/auth/mfa/totp/disable',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectUser(projectService, projectAccessService, authService, request)
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.updateUserState(
+                    project.id,
+                    project.usersChannel,
+                    request.user!.sub!,
+                    provider,
+                    getIndexManager(project.id),
+                    {
+                        totp_enabled: false,
+                        totp_secret_encrypted: null,
+                    }
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'warning', 'User MFA disabled', {
+                    action: 'auth.mfa.disable',
+                    userId: request.user!.sub,
+                })
+
+                return reply.send({ data: user })
+            })
+        }
+    )
+
+    app.post<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId/mfa/totp/disable',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                const user = await authService.updateUserState(
+                    project.id,
+                    project.usersChannel,
+                    request.params.userId,
+                    provider,
+                    getIndexManager(project.id),
+                    {
+                        totp_enabled: false,
+                        totp_secret_encrypted: null,
+                    }
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'warning', 'Admin disabled user MFA', {
+                    action: 'auth.admin.mfa.disable',
+                    userId: request.params.userId,
+                    actorUserId: request.user!.sub,
+                })
+
+                return reply.send({ data: user })
+            })
+        }
+    )
+
+    app.delete<{ Params: { projectId: string; userId: string } }>(
+        '/api/v1/:projectId/auth/users/:userId',
+        { preHandler: [authMiddleware] },
+        async (request, reply) => {
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'auth.manage',
+                allowProjectUsers: false,
+            })
+
+            return projectService.withProjectStorageRecord(project, async (_project, provider) => {
+                await authService.deleteUser(
+                    project.id,
+                    project.usersChannel,
+                    request.params.userId,
+                    provider,
+                    getIndexManager(project.id)
+                )
+
+                await recordProjectSecurityEvent(operationsLogService, project.id, 'warning', 'Auth user deleted', {
+                    action: 'auth.admin.delete_user',
+                    userId: request.params.userId,
+                    actorUserId: request.user!.sub,
+                })
+
+                return reply.send({ data: { message: 'User deleted' } })
+            })
+        }
+    )
 }
 
 async function exchangeOAuthCode(
@@ -685,4 +1091,22 @@ function getCookieValue(request: FastifyRequest, name: string): string | undefin
     }
 
     return undefined
+}
+
+async function recordProjectSecurityEvent(
+    operationsLogService: OperationsLogService,
+    projectId: string,
+    level: 'info' | 'success' | 'warning' | 'error',
+    message: string,
+    metadata: Record<string, unknown>
+): Promise<void> {
+    await operationsLogService.record({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        projectId,
+        scope: 'security',
+        level,
+        message,
+        metadata,
+        timestamp: new Date().toISOString(),
+    })
 }

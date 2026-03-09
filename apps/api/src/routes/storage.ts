@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type { BucketPermission, BucketPolicy, Project } from '@openbase/core'
 import { ConflictError, ForbiddenError } from '@openbase/core'
 import { z } from 'zod'
+import type { ProjectAccessService } from '../access/ProjectAccessService.js'
+import type { AuthService } from '../auth/AuthService.js'
 import { authMiddleware, optionalAuthMiddleware } from '../middleware/auth.js'
 import type { ProjectService } from '../projects/ProjectService.js'
 import type { StorageService } from '../storage/StorageService.js'
@@ -22,13 +24,15 @@ type BucketAction = 'read' | 'write' | 'delete'
 export function registerStorageRoutes(
     app: FastifyInstance,
     storageService: StorageService,
-    projectService: ProjectService
+    projectService: ProjectService,
+    projectAccessService: ProjectAccessService,
+    authService: AuthService
 ): void {
     app.post<{ Params: { projectId: string } }>(
         '/api/v1/:projectId/storage/buckets',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAdminAccess(projectService, request)
+            const project = await assertProjectAdminAccess(projectService, projectAccessService, request)
             const body = createBucketSchema.parse(request.body)
 
             if (project.buckets[body.name]) {
@@ -57,7 +61,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, request, request.params.bucket, 'write')
+            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'write')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -96,7 +100,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [optionalAuthMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, request, request.params.bucket, 'read')
+            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -145,7 +149,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket',
         { preHandler: [optionalAuthMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, request, request.params.bucket, 'read')
+            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'read')
             const { bucket } = request.params
             const { prefix } = request.query as { prefix?: string }
             const bucketChannel = project.buckets[bucket]
@@ -172,7 +176,7 @@ export function registerStorageRoutes(
         '/api/v1/:projectId/storage/:bucket/*',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await getAuthorizedBucketProject(projectService, request, request.params.bucket, 'delete')
+            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, request.params.bucket, 'delete')
             const { bucket } = request.params
             const filePath = request.params['*']
             const bucketChannel = project.buckets[bucket]
@@ -211,7 +215,7 @@ export function registerStorageRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const body = signedUrlSchema.parse(request.body)
-            const project = await getAuthorizedBucketProject(projectService, request, body.bucket, 'read')
+            const project = await getAuthorizedBucketProject(projectService, projectAccessService, authService, request, body.bucket, 'read')
 
             if (!project.buckets[body.bucket]) {
                 return reply.status(404).send({ error: { message: `Bucket "${body.bucket}" not found` } })
@@ -278,18 +282,26 @@ export function registerStorageRoutes(
 
 async function getAuthorizedBucketProject(
     projectService: ProjectService,
+    projectAccessService: ProjectAccessService,
+    authService: AuthService,
     request: FastifyRequest<{ Params: Record<string, string> }>,
     bucketName: string,
     action: BucketAction
 ): Promise<Project> {
     const project = await projectService.getProject(request.params.projectId)
+    const user = request.user
+
+    if (user?.role === 'platform_user') {
+        await projectAccessService.assertPlatformPermission(project.id, user, mapBucketActionToPermission(action))
+        return project
+    }
 
     if (!project.buckets[bucketName]) {
         return project
     }
 
     const policy = getBucketPolicy(project, bucketName)
-    if (isBucketAccessAllowed(project, policy, request.user, action)) {
+    if (await isBucketAccessAllowed(project, policy, authService, user, action)) {
         return project
     }
 
@@ -300,12 +312,13 @@ function getBucketPolicy(project: Project, bucketName: string): BucketPolicy {
     return project.bucketPolicies[bucketName] ?? { public: false }
 }
 
-function isBucketAccessAllowed(
+async function isBucketAccessAllowed(
     project: Project,
     policy: BucketPolicy,
+    authService: AuthService,
     user: FastifyRequest['user'],
     action: BucketAction
-): boolean {
+): Promise<boolean> {
     const permission = getPermission(policy, action)
 
     if (action === 'read' && (permission.public === true || policy.public === true)) {
@@ -317,11 +330,20 @@ function isBucketAccessAllowed(
     }
 
     if (user.role === 'platform_user') {
-        if (user.sub !== project.ownerId) {
-            return false
-        }
-    } else if (user.projectId !== project.id) {
         return false
+    }
+
+    if (user.projectId !== project.id) {
+        return false
+    }
+
+    const active = await authService.isSessionActive(user)
+    if (!active) {
+        return false
+    }
+
+    if (user.role === 'service_role') {
+        return true
     }
 
     if (permission.userIds?.includes(user.sub || '')) {
@@ -346,6 +368,7 @@ function getPermission(policy: BucketPolicy, action: BucketAction): BucketPermis
 
 async function assertProjectAdminAccess(
     projectService: ProjectService,
+    projectAccessService: ProjectAccessService,
     request: FastifyRequest<{ Params: Record<string, string> }>
 ) {
     const project = await projectService.getProject(request.params.projectId)
@@ -355,7 +378,8 @@ async function assertProjectAdminAccess(
         throw new ForbiddenError('Authentication required')
     }
 
-    if (user.role === 'platform_user' && user.sub === project.ownerId) {
+    if (user.role === 'platform_user') {
+        await projectAccessService.assertPlatformPermission(project.id, user, 'storage.manage')
         return project
     }
 
@@ -364,6 +388,17 @@ async function assertProjectAdminAccess(
     }
 
     throw new ForbiddenError('Administrative access required')
+}
+
+function mapBucketActionToPermission(action: BucketAction) {
+    switch (action) {
+        case 'read':
+            return 'storage.read' as const
+        case 'write':
+            return 'storage.write' as const
+        case 'delete':
+            return 'storage.manage' as const
+    }
 }
 
 function getTransformOptions(query: { width?: string; height?: string; format?: string }) {

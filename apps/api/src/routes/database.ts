@@ -2,11 +2,14 @@
  * Database Routes — CRUD for tables and rows.
  */
 
-import type { FastifyInstance, FastifyRequest } from 'fastify'
+import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { ColumnDefinition, JWTPayload, TableSchema } from '@openbase/core'
 import { ForbiddenError, NotFoundError } from '@openbase/core'
 import type { StorageProvider } from '@openbase/telegram'
+import type { ProjectAccessService } from '../access/ProjectAccessService.js'
+import { assertRouteProjectPermission } from '../access/routePermissions.js'
+import type { AuthService } from '../auth/AuthService.js'
 import type { EncryptionService } from '../encryption/EncryptionService.js'
 import { IndexManager, buildProjectQueryEngine, parseDatabaseRequestQuery } from '../database/index.js'
 import { applyRLS, authMiddleware, checkRLSForRow, findPolicy } from '../middleware/index.js'
@@ -34,6 +37,8 @@ const createTableSchema = z.object({
 export function registerDatabaseRoutes(
     app: FastifyInstance,
     projectService: ProjectService,
+    projectAccessService: ProjectAccessService,
+    authService: AuthService,
     getIndexManager: (projectId: string) => IndexManager,
     encryptionService: EncryptionService,
     masterKey: Buffer,
@@ -44,7 +49,9 @@ export function registerDatabaseRoutes(
         '/api/v1/:projectId/tables',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.read',
+            })
             const schemas = await projectService.getSchemas(project.id)
 
             return reply.send({
@@ -62,7 +69,10 @@ export function registerDatabaseRoutes(
         '/api/v1/:projectId/tables',
         { preHandler: [authMiddleware] },
         async (request, reply) => {
-            const project = await assertProjectAdminAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.manage',
+                allowProjectUsers: false,
+            })
             const body = createTableSchema.parse(request.body)
             const encryptedColumns = new Set(
                 body.columns.filter(column => column.encrypted).map(column => column.name)
@@ -105,7 +115,9 @@ export function registerDatabaseRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const { table } = request.params
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.read',
+            })
             const schema = await getTableSchema(projectService, project.id, table)
             const parsedQuery = parseDatabaseRequestQuery(request)
 
@@ -116,7 +128,7 @@ export function registerDatabaseRoutes(
                     orderBy: parsedQuery.orderBy,
                 })
 
-                if (!canBypassRLS(request.user)) {
+                if (!canBypassRLS(request.user, project)) {
                     rows = applyRLS(rows, findPolicy(schema.rls, 'SELECT'), request.user || null)
                 }
 
@@ -145,14 +157,16 @@ export function registerDatabaseRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const { table } = request.params
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.write',
+            })
             const schema = await getTableSchema(projectService, project.id, table)
             const parsedQuery = parseDatabaseRequestQuery(request)
             const rows = Array.isArray(request.body)
                 ? request.body as Record<string, unknown>[]
                 : [request.body as Record<string, unknown>]
 
-            if (!canBypassRLS(request.user)) {
+            if (!canBypassRLS(request.user, project)) {
                 const insertPolicy = findPolicy(schema.rls, 'INSERT')
                 const unauthorizedRow = rows.find(row => !checkRLSForRow(row, insertPolicy, request.user || null))
                 if (unauthorizedRow) {
@@ -188,7 +202,9 @@ export function registerDatabaseRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const { table } = request.params
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.write',
+            })
             const schema = await getTableSchema(projectService, project.id, table)
             const parsedQuery = parseDatabaseRequestQuery(request)
             const patch = request.body as Record<string, unknown>
@@ -197,7 +213,7 @@ export function registerDatabaseRoutes(
                 const queryEngine = buildQueryEngine(provider, getIndexManager(project.id), schema, encryptionService, masterKey)
                 let rows = await queryEngine.select(table, project.channelMap[table], { filters: parsedQuery.filters })
 
-                if (!canBypassRLS(request.user)) {
+                if (!canBypassRLS(request.user, project)) {
                     rows = applyRLS(rows, findPolicy(schema.rls, 'UPDATE'), request.user || null)
                 }
 
@@ -221,7 +237,9 @@ export function registerDatabaseRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const { table } = request.params
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.write',
+            })
             const schema = await getTableSchema(projectService, project.id, table)
             const parsedQuery = parseDatabaseRequestQuery(request)
 
@@ -229,7 +247,7 @@ export function registerDatabaseRoutes(
                 const queryEngine = buildQueryEngine(provider, getIndexManager(project.id), schema, encryptionService, masterKey)
                 let rows = await queryEngine.select(table, project.channelMap[table], { filters: parsedQuery.filters })
 
-                if (!canBypassRLS(request.user)) {
+                if (!canBypassRLS(request.user, project)) {
                     rows = applyRLS(rows, findPolicy(schema.rls, 'DELETE'), request.user || null)
                 }
 
@@ -252,7 +270,9 @@ export function registerDatabaseRoutes(
         { preHandler: [authMiddleware] },
         async (request, reply) => {
             const { table } = request.params
-            const project = await assertProjectAccess(projectService, request)
+            const project = await assertRouteProjectPermission(projectService, projectAccessService, authService, request, {
+                permission: 'tables.read',
+            })
             const schema = await getTableSchema(projectService, project.id, table)
             const parsedQuery = parseDatabaseRequestQuery(request)
 
@@ -260,7 +280,7 @@ export function registerDatabaseRoutes(
                 const queryEngine = buildQueryEngine(provider, getIndexManager(project.id), schema, encryptionService, masterKey)
                 let rows = await queryEngine.select(table, project.channelMap[table], { filters: parsedQuery.filters })
 
-                if (!canBypassRLS(request.user)) {
+                if (!canBypassRLS(request.user, project)) {
                     rows = applyRLS(rows, findPolicy(schema.rls, 'SELECT'), request.user || null)
                 }
 
@@ -268,41 +288,6 @@ export function registerDatabaseRoutes(
             })
         }
     )
-}
-
-async function assertProjectAccess(
-    projectService: ProjectService,
-    request: FastifyRequest<{ Params: Record<string, string> }>
-) {
-    const project = await projectService.getProject(request.params.projectId)
-    const user = request.user
-
-    if (!user) {
-        throw new ForbiddenError('Authentication required')
-    }
-
-    if (user.role === 'platform_user' && user.sub === project.ownerId) {
-        return project
-    }
-
-    if (user.projectId === project.id) {
-        return project
-    }
-
-    throw new ForbiddenError('You do not have access to this project')
-}
-
-async function assertProjectAdminAccess(
-    projectService: ProjectService,
-    request: FastifyRequest<{ Params: Record<string, string> }>
-) {
-    const project = await assertProjectAccess(projectService, request)
-
-    if (request.user?.role === 'platform_user' || request.user?.role === 'service_role') {
-        return project
-    }
-
-    throw new ForbiddenError('Administrative access required')
 }
 
 async function getTableSchema(
@@ -320,8 +305,8 @@ async function getTableSchema(
     return schema
 }
 
-function canBypassRLS(user?: JWTPayload): boolean {
-    return user?.role === 'service_role' || user?.role === 'platform_user'
+function canBypassRLS(user: JWTPayload | undefined, project: { ownerId: string }): boolean {
+    return user?.role === 'service_role' || (user?.role === 'platform_user' && user.sub === project.ownerId)
 }
 
 function buildQueryEngine(

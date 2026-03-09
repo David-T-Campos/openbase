@@ -1,24 +1,31 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { authUserSchema } from '@openbase/core'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams } from 'next/navigation'
-import { Plus, ShieldCheck, Users } from 'lucide-react'
-import { authenticatedFetch } from '../../../../lib/platformApi'
+import { z } from 'zod'
+import {
+    Ban,
+    CheckCircle2,
+    KeyRound,
+    Mail,
+    Plus,
+    RotateCcw,
+    ShieldCheck,
+    ShieldOff,
+    Trash2,
+    Users,
+} from 'lucide-react'
+import { authenticatedFetch, getApiUrl, readApiEnvelope } from '../../../../lib/platformApi'
 
-interface AuthUser {
-    id: string
-    email: string
-    created_at: string
-    confirmed_at?: string | null
-    role?: string
-    metadata?: Record<string, unknown>
-}
+const authProviderSchema = z.object({
+    name: z.string(),
+    key: z.enum(['email', 'magic_link', 'google', 'github', 'totp']),
+    enabled: z.boolean(),
+})
 
-interface AuthProvider {
-    name: string
-    key: 'email' | 'magic_link' | 'google' | 'github' | 'totp'
-    enabled: boolean
-}
+type AuthUser = z.infer<typeof authUserSchema>
+type AuthProvider = z.infer<typeof authProviderSchema>
 
 export default function AuthSettingsPage() {
     const params = useParams()
@@ -32,20 +39,25 @@ export default function AuthSettingsPage() {
     const [showInvite, setShowInvite] = useState(false)
     const [error, setError] = useState('')
     const [oauthLoading, setOauthLoading] = useState<string | null>(null)
+    const [actionUserId, setActionUserId] = useState<string | null>(null)
 
     useEffect(() => {
         void fetchUsers()
         void fetchProviders()
     }, [projectId])
 
-    const fetchUsers = async () => {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
-        try {
-            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/auth/users`)
-            if (!res.ok) return
+    const summary = useMemo(() => ({
+        total: users.length,
+        disabled: users.filter(user => Boolean(user.disabled_at)).length,
+        mfa: users.filter(user => user.totp_enabled).length,
+        unconfirmed: users.filter(user => !user.confirmed_at).length,
+    }), [users])
 
-            const data = await res.json()
-            setUsers(Array.isArray(data.data) ? data.data : [])
+    const fetchUsers = async () => {
+        try {
+            const res = await authenticatedFetch(`${getApiUrl()}/api/v1/${projectId}/auth/users`)
+            const data = await readApiEnvelope(res, z.array(authUserSchema))
+            setUsers(data)
         } catch {
             setUsers([])
         } finally {
@@ -54,13 +66,10 @@ export default function AuthSettingsPage() {
     }
 
     const fetchProviders = async () => {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
         try {
-            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/auth/providers`)
-            if (!res.ok) return
-
-            const data = await res.json()
-            setProviders(Array.isArray(data.data) ? data.data : [])
+            const res = await authenticatedFetch(`${getApiUrl()}/api/v1/${projectId}/auth/providers`)
+            const data = await readApiEnvelope(res, z.array(authProviderSchema))
+            setProviders(data)
         } catch {
             setProviders([])
         } finally {
@@ -68,14 +77,30 @@ export default function AuthSettingsPage() {
         }
     }
 
+    const runUserAction = async (userId: string, request: RequestInit & { path: string }) => {
+        setActionUserId(userId)
+        setError('')
+
+        try {
+            const response = await authenticatedFetch(`${getApiUrl()}/api/v1/${projectId}${request.path}`, request)
+            if (!response.ok) {
+                const payload = await response.json()
+                throw new Error(payload.error?.message || 'Action failed')
+            }
+            await fetchUsers()
+        } catch (nextError) {
+            setError((nextError as Error).message)
+        } finally {
+            setActionUserId(null)
+        }
+    }
+
     const handleInviteUser = async () => {
         if (!inviteEmail || !invitePassword) return
         setError('')
 
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
-
         try {
-            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/auth/signup`, {
+            const res = await authenticatedFetch(`${getApiUrl()}/api/v1/${projectId}/auth/users`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -83,11 +108,7 @@ export default function AuthSettingsPage() {
                 body: JSON.stringify({ email: inviteEmail, password: invitePassword }),
             })
 
-            if (!res.ok) {
-                const data = await res.json()
-                throw new Error(data.error?.message || 'Failed to create user')
-            }
-
+            await readApiEnvelope(res, authUserSchema)
             setInviteEmail('')
             setInvitePassword('')
             setShowInvite(false)
@@ -98,12 +119,11 @@ export default function AuthSettingsPage() {
     }
 
     const handleStartOAuth = async (provider: 'google' | 'github') => {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
         setOauthLoading(provider)
         setError('')
 
         try {
-            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/auth/oauth/${provider}/start`, {
+            const res = await authenticatedFetch(`${getApiUrl()}/api/v1/${projectId}/auth/oauth/${provider}/start`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -128,12 +148,38 @@ export default function AuthSettingsPage() {
 
     return (
         <div className="shell py-8 md:py-10">
-            <div>
-                <h1 className="text-3xl font-semibold tracking-[-0.04em] text-white">Authentication</h1>
-                <p className="mt-2 text-sm subtle">Inspect providers, create users, and review project-level auth records.</p>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                    <h1 className="text-3xl font-semibold tracking-[-0.04em] text-white">Authentication</h1>
+                    <p className="mt-2 text-sm subtle">Manage providers, confirm users, revoke sessions, and keep MFA posture visible from one console.</p>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-4">
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Users</div>
+                        <div className="mt-2 text-2xl font-semibold text-white">{summary.total}</div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">MFA enabled</div>
+                        <div className="mt-2 text-2xl font-semibold text-white">{summary.mfa}</div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Unconfirmed</div>
+                        <div className="mt-2 text-2xl font-semibold text-white">{summary.unconfirmed}</div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Disabled</div>
+                        <div className="mt-2 text-2xl font-semibold text-white">{summary.disabled}</div>
+                    </div>
+                </div>
             </div>
 
-            <div className="mt-6 grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+            {error && (
+                <div className="mt-6 rounded-[10px] border border-[rgba(239,111,108,0.25)] bg-[rgba(239,111,108,0.08)] px-4 py-3 text-sm text-[#f0b1af]">
+                    {error}
+                </div>
+            )}
+
+            <div className="mt-6 grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
                 <section className="panel p-6">
                     <div className="flex items-center gap-3">
                         <ShieldCheck className="h-5 w-5 text-[color:var(--accent)]" />
@@ -176,8 +222,8 @@ export default function AuthSettingsPage() {
                 <section className="panel overflow-hidden">
                     <div className="panel-header flex flex-col gap-4 px-6 py-4 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <div className="text-lg font-semibold text-white">Users</div>
-                            <div className="mt-1 text-sm subtle">Project-scoped auth users created through the auth service.</div>
+                            <div className="text-lg font-semibold text-white">User management</div>
+                            <div className="mt-1 text-sm subtle">Project-scoped auth identities with admin controls for confirmation, recovery, disablement, and MFA reset.</div>
                         </div>
                         <button type="button" onClick={() => setShowInvite(true)} className="btn btn-primary">
                             <Plus className="h-4 w-4" />
@@ -187,11 +233,6 @@ export default function AuthSettingsPage() {
 
                     {showInvite && (
                         <div className="border-b border-[color:var(--line)] bg-[rgba(255,255,255,0.02)] px-6 py-5">
-                            {error && (
-                                <div className="mb-4 rounded-[10px] border border-[rgba(239,111,108,0.25)] bg-[rgba(239,111,108,0.08)] px-4 py-3 text-sm text-[#f0b1af]">
-                                    {error}
-                                </div>
-                            )}
                             <div className="grid gap-4 md:grid-cols-2">
                                 <div>
                                     <label htmlFor="invite-email" className="label">
@@ -208,7 +249,7 @@ export default function AuthSettingsPage() {
                                 </div>
                                 <div>
                                     <label htmlFor="invite-password" className="label">
-                                        Password
+                                        Temporary password
                                     </label>
                                     <input
                                         id="invite-password"
@@ -248,32 +289,132 @@ export default function AuthSettingsPage() {
                                 <Users className="mx-auto h-10 w-10 text-[color:var(--accent)]" />
                                 <div className="mt-4 text-xl font-semibold text-white">No users yet</div>
                                 <p className="mt-3 text-sm leading-7 subtle">
-                                    Users appear here after sign-up or after you create them from the console.
+                                    Users appear here after sign-up or after you create them from this console.
                                 </p>
                             </div>
                         </div>
                     ) : (
-                        <div className="table-shell">
-                            <table className="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>Email</th>
-                                        <th>Role</th>
-                                        <th>User ID</th>
-                                        <th>Created</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {users.map(user => (
-                                        <tr key={user.id}>
-                                            <td className="text-white">{user.email}</td>
-                                            <td className="subtle">{user.role || 'authenticated'}</td>
-                                            <td className="font-mono text-xs subtle">{user.id}</td>
-                                            <td className="subtle">{new Date(user.created_at).toLocaleDateString()}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
+                        <div className="divide-y divide-[color:var(--line)]">
+                            {users.map(user => {
+                                const busy = actionUserId === user.id
+                                const confirmed = Boolean(user.confirmed_at)
+                                const disabled = Boolean(user.disabled_at)
+
+                                return (
+                                    <article key={user.id} className="px-6 py-5">
+                                        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                                            <div className="min-w-0">
+                                                <div className="truncate text-base font-semibold text-white">{user.email}</div>
+                                                <div className="mt-2 font-mono text-xs subtle">{user.id}</div>
+                                                <div className="mt-3 flex flex-wrap gap-2">
+                                                    <span className={`status-badge ${confirmed ? 'text-[color:var(--success)]' : 'text-[color:var(--warning)]'}`}>
+                                                        <span className="status-dot" />
+                                                        {confirmed ? 'confirmed' : 'pending confirmation'}
+                                                    </span>
+                                                    <span className={`status-badge ${disabled ? 'text-[color:var(--danger)]' : 'text-[color:var(--accent)]'}`}>
+                                                        <span className="status-dot" />
+                                                        {disabled ? 'disabled' : 'active'}
+                                                    </span>
+                                                    <span className={`status-badge ${user.totp_enabled ? 'text-[color:var(--success)]' : 'text-[color:var(--muted)]'}`}>
+                                                        <span className="status-dot" />
+                                                        {user.totp_enabled ? 'mfa enabled' : 'mfa off'}
+                                                    </span>
+                                                </div>
+                                                <div className="mt-3 text-xs subtle">
+                                                    Last sign-in {user.last_sign_in_at ? new Date(user.last_sign_in_at).toLocaleString() : 'never'}
+                                                </div>
+                                                {user.disabled_reason && (
+                                                    <div className="mt-2 text-xs text-[#f0b1af]">{user.disabled_reason}</div>
+                                                )}
+                                            </div>
+
+                                            <div className="flex flex-wrap gap-2">
+                                                {!confirmed && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void runUserAction(user.id, {
+                                                            path: `/auth/users/${user.id}/confirm`,
+                                                            method: 'POST',
+                                                        })}
+                                                        disabled={busy}
+                                                        className="btn btn-secondary h-9 min-h-0 px-3"
+                                                    >
+                                                        <CheckCircle2 className="h-4 w-4" />
+                                                        Confirm
+                                                    </button>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void runUserAction(user.id, {
+                                                        path: `/auth/users/${user.id}/password-reset`,
+                                                        method: 'POST',
+                                                    })}
+                                                    disabled={busy}
+                                                    className="btn btn-secondary h-9 min-h-0 px-3"
+                                                >
+                                                    <Mail className="h-4 w-4" />
+                                                    Reset email
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void runUserAction(user.id, {
+                                                        path: `/auth/users/${user.id}/revoke-sessions`,
+                                                        method: 'POST',
+                                                    })}
+                                                    disabled={busy}
+                                                    className="btn btn-secondary h-9 min-h-0 px-3"
+                                                >
+                                                    <RotateCcw className="h-4 w-4" />
+                                                    Revoke sessions
+                                                </button>
+                                                {user.totp_enabled && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void runUserAction(user.id, {
+                                                            path: `/auth/users/${user.id}/mfa/totp/disable`,
+                                                            method: 'POST',
+                                                        })}
+                                                        disabled={busy}
+                                                        className="btn btn-secondary h-9 min-h-0 px-3"
+                                                    >
+                                                        <ShieldOff className="h-4 w-4" />
+                                                        Disable MFA
+                                                    </button>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void runUserAction(user.id, {
+                                                        path: `/auth/users/${user.id}`,
+                                                        method: 'PATCH',
+                                                        headers: { 'Content-Type': 'application/json' },
+                                                        body: JSON.stringify({
+                                                            disabled: !disabled,
+                                                            reason: disabled ? undefined : 'Disabled from the OpenBase dashboard',
+                                                        }),
+                                                    })}
+                                                    disabled={busy}
+                                                    className={disabled ? 'btn btn-secondary h-9 min-h-0 px-3' : 'btn btn-danger h-9 min-h-0 px-3'}
+                                                >
+                                                    {disabled ? <Ban className="h-4 w-4" /> : <KeyRound className="h-4 w-4" />}
+                                                    {disabled ? 'Re-enable' : 'Disable'}
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void runUserAction(user.id, {
+                                                        path: `/auth/users/${user.id}`,
+                                                        method: 'DELETE',
+                                                    })}
+                                                    disabled={busy}
+                                                    className="btn btn-danger h-9 min-h-0 px-3"
+                                                >
+                                                    <Trash2 className="h-4 w-4" />
+                                                    Delete
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </article>
+                                )
+                            })}
                         </div>
                     )}
                 </section>

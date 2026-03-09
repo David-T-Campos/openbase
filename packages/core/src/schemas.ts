@@ -19,6 +19,10 @@ export const authUserSchema = z.object({
     metadata: z.record(z.unknown()).optional(),
     identities: z.array(userIdentitySchema).optional(),
     totp_enabled: z.boolean().optional(),
+    confirmed_at: z.string().nullable().optional(),
+    disabled_at: z.string().nullable().optional(),
+    disabled_reason: z.string().nullable().optional(),
+    last_sign_in_at: z.string().nullable().optional(),
 })
 
 export const authSessionSchema = z.object({
@@ -119,6 +123,60 @@ export const columnDefinitionSchema = z.object({
     unique: z.boolean().optional(),
     default: z.unknown().optional(),
     encrypted: z.boolean().optional(),
+})
+
+export const projectPermissionSchema = z.enum([
+    'project.read',
+    'project.delete',
+    'tables.read',
+    'tables.write',
+    'tables.manage',
+    'storage.read',
+    'storage.write',
+    'storage.manage',
+    'auth.read',
+    'auth.manage',
+    'webhooks.read',
+    'webhooks.manage',
+    'migrations.read',
+    'migrations.manage',
+    'logs.read',
+    'audit.read',
+    'settings.read',
+    'settings.manage',
+    'members.read',
+    'members.manage',
+    'roles.read',
+    'roles.manage',
+])
+
+export const projectRoleDefinitionSchema = z.object({
+    key: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    permissions: z.array(projectPermissionSchema),
+    system: z.boolean().optional(),
+})
+
+export const projectMemberSchema = z.object({
+    userId: z.string(),
+    email: z.string().email(),
+    roleKey: z.string(),
+    addedAt: z.string(),
+    addedBy: z.string(),
+})
+
+export const projectInvitationSchema = z.object({
+    id: z.string(),
+    token: z.string(),
+    projectId: z.string(),
+    email: z.string().email(),
+    roleKey: z.string(),
+    invitedBy: z.string(),
+    createdAt: z.string(),
+    expiresAt: z.string(),
+    acceptedAt: z.string().nullable().optional(),
+    revokedAt: z.string().nullable().optional(),
 })
 
 export const rlsPolicySchema = z.object({

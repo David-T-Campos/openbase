@@ -15,6 +15,10 @@ type PasswordSignInResult = AuthResult | {
     challenge_token: string
     user: AuthResult['user']
 }
+type SignUpResult = AuthResult | {
+    user: AuthResult['user']
+    confirmation_required: true
+}
 
 const messageSchema = z.object({
     message: z.string(),
@@ -29,6 +33,14 @@ const passwordSignInSchema = z.union([
     }),
 ])
 
+const signUpSchema = z.union([
+    authResultSchema,
+    z.object({
+        user: authUserSchema,
+        confirmation_required: z.literal(true),
+    }),
+])
+
 const sessionEnvelopeSchema = z.object({
     session: authSessionSchema,
 })
@@ -37,6 +49,31 @@ export class AuthClient {
     private accessToken: string | null = null
     private refreshToken: string | null = null
     private listeners = new Set<AuthStateListener>()
+    readonly mfa = {
+        enroll: async () => {
+            return this.request<{ enrollment_token: string; secret: string; uri: string }>('/auth/mfa/totp/enroll', {
+                useAccessToken: true,
+                schema: z.object({
+                    enrollment_token: z.string(),
+                    secret: z.string(),
+                    uri: z.string(),
+                }),
+            })
+        },
+        verify: async (payload: { enrollment_token: string; code: string }) => {
+            return this.request<{ enabled: boolean }>('/auth/mfa/totp/verify', {
+                useAccessToken: true,
+                body: payload,
+                schema: z.object({ enabled: z.boolean() }),
+            })
+        },
+        disable: async () => {
+            return this.request<AuthResult['user']>('/auth/mfa/totp/disable', {
+                useAccessToken: true,
+                schema: authUserSchema,
+            })
+        },
+    }
 
     constructor(
         private readonly projectUrl: string,
@@ -49,13 +86,13 @@ export class AuthClient {
         email: string
         password: string
         metadata?: Record<string, unknown>
-    }): Promise<{ data: AuthResult | null; error: AuthError | null }> {
-        const result = await this.request<AuthResult>('/auth/signup', {
+    }): Promise<{ data: SignUpResult | null; error: AuthError | null }> {
+        const result = await this.request<SignUpResult>('/auth/signup', {
             body: credentials,
-            schema: authResultSchema,
+            schema: signUpSchema,
         })
 
-        if (result.data?.session) {
+        if (result.data && 'session' in result.data && result.data.session) {
             this.setSession(result.data.session, 'SIGNED_IN')
         }
 
@@ -102,6 +139,49 @@ export class AuthClient {
             data: null,
             error: result.error,
         }
+    }
+
+    async confirmEmail(token: string): Promise<{ data: AuthResult | null; error: AuthError | null }> {
+        const result = await this.request<AuthResult>('/auth/confirm', {
+            body: { token },
+            schema: authResultSchema,
+        })
+
+        if (result.data?.session) {
+            this.setSession(result.data.session, 'SIGNED_IN')
+        }
+
+        return result
+    }
+
+    async resetPasswordForEmail(options: {
+        email: string
+    }): Promise<{ data: null; error: AuthError | null }> {
+        const result = await this.request<{ message: string }>('/auth/password-reset/request', {
+            body: options,
+            schema: messageSchema,
+        })
+
+        return {
+            data: null,
+            error: result.error,
+        }
+    }
+
+    async updatePassword(options: {
+        token: string
+        password: string
+    }): Promise<{ data: AuthResult | null; error: AuthError | null }> {
+        const result = await this.request<AuthResult>('/auth/password-reset/confirm', {
+            body: options,
+            schema: authResultSchema,
+        })
+
+        if (result.data?.session) {
+            this.setSession(result.data.session, 'SIGNED_IN')
+        }
+
+        return result
     }
 
     /** Sign out */
