@@ -571,7 +571,7 @@ The dashboard also includes a project-scoped Functions page for create, edit, de
 
 ## Repository Layout
 
-![OpenBase repository layout](docs/assets/openbase-repo-layout.jpg)
+![OpenBase repository layout](docs/assets/openbase-repo-layout.png)
 
 ## Limitations
 
