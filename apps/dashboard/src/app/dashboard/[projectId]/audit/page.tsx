@@ -139,6 +139,11 @@ export default function AuditPage() {
                                     <span className="font-mono text-xs subtle">{new Date(entry.timestamp).toLocaleString()}</span>
                                 </div>
                                 <div className="mt-3 text-sm text-white">{entry.message}</div>
+                                {typeof entry.metadata?.actorUserId === 'string' && (
+                                    <div className="mt-2 text-xs subtle">
+                                        Actor {entry.metadata.actorUserId}
+                                    </div>
+                                )}
                                 {entry.code && (
                                     <div className="mt-2 font-mono text-[11px] subtle">{entry.code}</div>
                                 )}

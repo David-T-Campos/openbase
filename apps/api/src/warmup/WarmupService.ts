@@ -4,13 +4,23 @@
 
 import { Queue, Worker } from 'bullmq'
 import type Redis from 'ioredis'
-import type { Project, ProjectStatus, TelegramChannelRef } from '@openbase/core'
+import type {
+    Project,
+    ProjectStatus,
+    QueueJobAction,
+    QueueJobSnapshot,
+    QueueSummary,
+    TelegramChannelRef,
+    WarmupOverrideMode,
+    WarmupStatus,
+} from '@openbase/core'
 import { sleep as defaultSleep } from '@openbase/core'
 import { EncryptionService } from '../encryption/EncryptionService.js'
 import { TelegramSessionPool } from '../telegram/TelegramSessionPool.js'
 
 const DEFAULT_DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_QUEUE_NAME = 'openbase-warmup'
+const DEFAULT_WARMUP_OVERRIDE: WarmupOverrideMode = 'default'
 
 interface WarmupRecord {
     projectId: string
@@ -127,6 +137,16 @@ export class WarmupService {
 
         const warmup = JSON.parse(warmupData) as WarmupRecord
         const project = JSON.parse(projectData) as Project
+        const overrideMode = await this.getOverride(projectId)
+
+        if (overrideMode === 'force_active') {
+            await this.forceProjectActive(projectId, warmup)
+            return true
+        }
+
+        if (overrideMode === 'paused') {
+            return false
+        }
 
         if (warmup.status === 'active') {
             return true
@@ -198,19 +218,16 @@ export class WarmupService {
         }
     }
 
-    async getStatus(projectId: string): Promise<{
-        status: string
-        daysCompleted: number
-        daysRequired: number
-        daysRemaining: number
-        percentComplete: number
-        lastError?: string | null
-    } | null> {
+    async getStatus(projectId: string): Promise<WarmupStatus | null> {
         const data = await this.redis.get(`warmup:${projectId}`)
         if (!data) return null
 
         const warmup = JSON.parse(data) as WarmupRecord
         const daysRemaining = Math.max(0, warmup.daysRequired - warmup.daysCompleted)
+        const [overrideMode, nextScheduledAt] = await Promise.all([
+            this.getOverride(projectId),
+            this.getNextScheduledAt(projectId),
+        ])
 
         return {
             status: warmup.status,
@@ -219,6 +236,8 @@ export class WarmupService {
             daysRemaining,
             percentComplete: Math.round((warmup.daysCompleted / warmup.daysRequired) * 100),
             lastError: warmup.lastError,
+            overrideMode,
+            nextScheduledAt,
         }
     }
 
@@ -227,8 +246,136 @@ export class WarmupService {
         return status?.status === 'active'
     }
 
+    async setOverride(projectId: string, overrideMode: WarmupOverrideMode): Promise<WarmupStatus | null> {
+        if (overrideMode === DEFAULT_WARMUP_OVERRIDE) {
+            await this.redis.del(this.getOverrideKey(projectId))
+            const warmup = await this.getWarmupRecord(projectId)
+            if (warmup && this.enableQueue) {
+                await this.scheduleMissingJobs(warmup)
+            }
+            return this.getStatus(projectId)
+        }
+
+        await this.redis.set(this.getOverrideKey(projectId), overrideMode)
+
+        if (overrideMode === 'paused') {
+            await this.removeProjectJobs(projectId)
+            return this.getStatus(projectId)
+        }
+
+        const warmup = await this.getWarmupRecord(projectId)
+        if (!warmup) {
+            return null
+        }
+
+        await this.forceProjectActive(projectId, warmup)
+        return this.getStatus(projectId)
+    }
+
+    async triggerTick(projectId: string): Promise<WarmupStatus | null> {
+        await this.executeWarmupTick(projectId)
+        return this.getStatus(projectId)
+    }
+
+    async getQueueSummary(): Promise<QueueSummary> {
+        if (!this.queue || typeof (this.queue as { getJobCounts?: unknown }).getJobCounts !== 'function' || typeof (this.queue as { isPaused?: unknown }).isPaused !== 'function') {
+            return {
+                name: 'warmup',
+                enabled: false,
+                paused: false,
+                waiting: 0,
+                active: 0,
+                delayed: 0,
+                failed: 0,
+                completed: 0,
+            }
+        }
+
+        const [counts, paused] = await Promise.all([
+            this.queue.getJobCounts('waiting', 'active', 'delayed', 'failed', 'completed'),
+            this.queue.isPaused(),
+        ])
+
+        return {
+            name: 'warmup',
+            enabled: true,
+            paused,
+            waiting: counts.waiting ?? 0,
+            active: counts.active ?? 0,
+            delayed: counts.delayed ?? 0,
+            failed: counts.failed ?? 0,
+            completed: counts.completed ?? 0,
+        }
+    }
+
+    async listJobs(projectId?: string, limit: number = 50): Promise<QueueJobSnapshot[]> {
+        if (!this.queue || typeof (this.queue as { getJobs?: unknown }).getJobs !== 'function') {
+            return []
+        }
+
+        const jobs = await this.queue.getJobs(['active', 'waiting', 'delayed', 'failed', 'completed'], 0, Math.max(0, limit - 1))
+        const snapshots = await Promise.all(
+            jobs.map(async job => ({
+                queue: 'warmup' as const,
+                id: String(job.id),
+                name: job.name,
+                state: (await job.getState()) as QueueJobSnapshot['state'],
+                projectId: typeof job.data?.projectId === 'string' ? job.data.projectId : null,
+                attemptsMade: job.attemptsMade,
+                attempts: job.opts.attempts ?? 1,
+                timestamp: job.timestamp,
+                processedOn: job.processedOn ?? null,
+                finishedOn: job.finishedOn ?? null,
+                delay: job.delay ?? 0,
+                failedReason: job.failedReason ?? null,
+                data: (job.data ?? {}) as unknown as Record<string, unknown>,
+            }))
+        )
+
+        return snapshots.filter(job => !projectId || job.projectId === projectId)
+    }
+
+    async manageJob(jobId: string, action: QueueJobAction): Promise<QueueJobSnapshot | null> {
+        if (!this.queue || typeof (this.queue as { getJob?: unknown }).getJob !== 'function') {
+            return null
+        }
+
+        const job = await this.queue.getJob(jobId)
+        if (!job) {
+            return null
+        }
+
+        if (action === 'retry') {
+            await job.retry()
+        } else if (action === 'remove') {
+            await job.remove()
+        } else if (action === 'promote') {
+            await job.promote()
+        }
+
+        if (action === 'remove') {
+            return null
+        }
+
+        return {
+            queue: 'warmup',
+            id: String(job.id),
+            name: job.name,
+            state: (await job.getState()) as QueueJobSnapshot['state'],
+            projectId: typeof job.data?.projectId === 'string' ? job.data.projectId : null,
+            attemptsMade: job.attemptsMade,
+            attempts: job.opts.attempts ?? 1,
+            timestamp: job.timestamp,
+            processedOn: job.processedOn ?? null,
+            finishedOn: job.finishedOn ?? null,
+            delay: job.delay ?? 0,
+            failedReason: job.failedReason ?? null,
+            data: (job.data ?? {}) as unknown as Record<string, unknown>,
+        }
+    }
+
     async cancelWarmup(projectId: string): Promise<void> {
-        await this.redis.del(`warmup:${projectId}`)
+        await this.redis.del(`warmup:${projectId}`, this.getOverrideKey(projectId))
         if (this.enableQueue) {
             await this.removeProjectJobs(projectId)
         }
@@ -253,8 +400,24 @@ export class WarmupService {
         await this.redis.set(`project:${projectId}`, JSON.stringify(project))
     }
 
+    private async forceProjectActive(projectId: string, warmup: WarmupRecord): Promise<void> {
+        warmup.daysCompleted = warmup.daysRequired
+        warmup.status = 'active'
+        warmup.failureCount = 0
+        warmup.lastError = null
+
+        await this.redis.set(`warmup:${projectId}`, JSON.stringify(warmup))
+        await this.syncProjectStatus(projectId, 'active', 0)
+        await this.removeProjectJobs(projectId)
+    }
+
     private async scheduleMissingJobs(warmup: WarmupRecord): Promise<void> {
         if (!this.queue) {
+            return
+        }
+
+        const overrideMode = await this.getOverride(warmup.projectId)
+        if (overrideMode === 'paused' || overrideMode === 'force_active') {
             return
         }
 
@@ -295,5 +458,40 @@ export class WarmupService {
 
     private getJobId(projectId: string, expectedTick: number): string {
         return `warmup:${projectId}:${expectedTick}`
+    }
+
+    private getOverrideKey(projectId: string): string {
+        return `warmup:${projectId}:override`
+    }
+
+    private async getOverride(projectId: string): Promise<WarmupOverrideMode> {
+        const value = await this.redis.get(this.getOverrideKey(projectId))
+        if (value === 'paused' || value === 'force_active') {
+            return value
+        }
+
+        return DEFAULT_WARMUP_OVERRIDE
+    }
+
+    private async getWarmupRecord(projectId: string): Promise<WarmupRecord | null> {
+        const data = await this.redis.get(`warmup:${projectId}`)
+        return data ? JSON.parse(data) as WarmupRecord : null
+    }
+
+    private async getNextScheduledAt(projectId: string): Promise<string | null> {
+        if (!this.queue || typeof (this.queue as { getJobs?: unknown }).getJobs !== 'function') {
+            return null
+        }
+
+        const jobs = await this.listJobs(projectId, 20)
+        const nextJob = jobs
+            .filter(job => job.state === 'waiting' || job.state === 'delayed')
+            .sort((left, right) => (left.timestamp + left.delay) - (right.timestamp + right.delay))[0]
+
+        if (!nextJob) {
+            return null
+        }
+
+        return new Date(nextJob.timestamp + nextJob.delay).toISOString()
     }
 }

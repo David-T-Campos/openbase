@@ -1,7 +1,14 @@
 import { createHmac, randomUUID } from 'crypto'
 import { Queue, Worker } from 'bullmq'
 import type Redis from 'ioredis'
-import type { OperationLogEntry, WebhookConfig, WebhookDeadLetter } from '@openbase/core'
+import type {
+    OperationLogEntry,
+    QueueJobAction,
+    QueueJobSnapshot,
+    QueueSummary,
+    WebhookConfig,
+    WebhookDeadLetter,
+} from '@openbase/core'
 import { nowISO } from '@openbase/core'
 import type { OperationsLogService } from '../ops/OperationsLogService.js'
 
@@ -262,6 +269,103 @@ export class WebhookService {
                 .filter(job => job.data.projectId === projectId)
                 .map(job => job.remove().catch(() => undefined))
         )
+    }
+
+    async getQueueSummary(): Promise<QueueSummary> {
+        if (!this.queue || typeof (this.queue as { getJobCounts?: unknown }).getJobCounts !== 'function' || typeof (this.queue as { isPaused?: unknown }).isPaused !== 'function') {
+            return {
+                name: 'webhooks',
+                enabled: false,
+                paused: false,
+                waiting: 0,
+                active: 0,
+                delayed: 0,
+                failed: 0,
+                completed: 0,
+            }
+        }
+
+        const [counts, paused] = await Promise.all([
+            this.queue.getJobCounts('waiting', 'active', 'delayed', 'failed', 'completed'),
+            this.queue.isPaused(),
+        ])
+
+        return {
+            name: 'webhooks',
+            enabled: true,
+            paused,
+            waiting: counts.waiting ?? 0,
+            active: counts.active ?? 0,
+            delayed: counts.delayed ?? 0,
+            failed: counts.failed ?? 0,
+            completed: counts.completed ?? 0,
+        }
+    }
+
+    async listJobs(projectId?: string, limit: number = 50): Promise<QueueJobSnapshot[]> {
+        if (!this.queue || typeof (this.queue as { getJobs?: unknown }).getJobs !== 'function') {
+            return []
+        }
+
+        const jobs = await this.queue.getJobs(['active', 'waiting', 'delayed', 'failed', 'completed'], 0, Math.max(0, limit - 1))
+        const snapshots = await Promise.all(
+            jobs.map(async job => ({
+                queue: 'webhooks' as const,
+                id: String(job.id),
+                name: job.name,
+                state: (await job.getState()) as QueueJobSnapshot['state'],
+                projectId: typeof job.data?.projectId === 'string' ? job.data.projectId : null,
+                attemptsMade: job.attemptsMade,
+                attempts: job.opts.attempts ?? 1,
+                timestamp: job.timestamp,
+                processedOn: job.processedOn ?? null,
+                finishedOn: job.finishedOn ?? null,
+                delay: job.delay ?? 0,
+                failedReason: job.failedReason ?? null,
+                data: (job.data ?? {}) as unknown as Record<string, unknown>,
+            }))
+        )
+
+        return snapshots.filter(job => !projectId || job.projectId === projectId)
+    }
+
+    async manageJob(jobId: string, action: QueueJobAction): Promise<QueueJobSnapshot | null> {
+        if (!this.queue || typeof (this.queue as { getJob?: unknown }).getJob !== 'function') {
+            return null
+        }
+
+        const job = await this.queue.getJob(jobId)
+        if (!job) {
+            return null
+        }
+
+        if (action === 'retry') {
+            await job.retry()
+        } else if (action === 'remove') {
+            await job.remove()
+        } else if (action === 'promote') {
+            await job.promote()
+        }
+
+        if (action === 'remove') {
+            return null
+        }
+
+        return {
+            queue: 'webhooks',
+            id: String(job.id),
+            name: job.name,
+            state: (await job.getState()) as QueueJobSnapshot['state'],
+            projectId: typeof job.data?.projectId === 'string' ? job.data.projectId : null,
+            attemptsMade: job.attemptsMade,
+            attempts: job.opts.attempts ?? 1,
+            timestamp: job.timestamp,
+            processedOn: job.processedOn ?? null,
+            finishedOn: job.finishedOn ?? null,
+            delay: job.delay ?? 0,
+            failedReason: job.failedReason ?? null,
+            data: (job.data ?? {}) as unknown as Record<string, unknown>,
+        }
     }
 
     async close(): Promise<void> {

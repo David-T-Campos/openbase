@@ -598,6 +598,102 @@ export interface TelegramSessionHealth {
     probeChannelId: string | null
 }
 
+export type QueueName = 'warmup' | 'webhooks'
+export type QueueJobState = 'waiting' | 'active' | 'delayed' | 'failed' | 'completed' | 'paused'
+export type QueueJobAction = 'retry' | 'remove' | 'promote'
+export type WarmupOverrideMode = 'default' | 'paused' | 'force_active'
+export type BackupTrigger = 'manual' | 'scheduled'
+
+export interface QueueSummary {
+    name: QueueName
+    enabled: boolean
+    paused: boolean
+    waiting: number
+    active: number
+    delayed: number
+    failed: number
+    completed: number
+}
+
+export interface QueueJobSnapshot {
+    queue: QueueName
+    id: string
+    name: string
+    state: QueueJobState
+    projectId: string | null
+    attemptsMade: number
+    attempts: number
+    timestamp: number
+    processedOn: number | null
+    finishedOn: number | null
+    delay: number
+    failedReason: string | null
+    data: Record<string, unknown>
+}
+
+export interface WarmupStatus {
+    status: string
+    daysCompleted: number
+    daysRequired: number
+    daysRemaining: number
+    percentComplete: number
+    lastError?: string | null
+    overrideMode: WarmupOverrideMode
+    nextScheduledAt: string | null
+}
+
+export interface BackupRecord {
+    id: string
+    createdAt: string
+    trigger: BackupTrigger
+    status: 'ready' | 'failed'
+    backupPath: string
+    projectCount: number
+    redisKeyCount: number
+    sqliteFileCount: number
+    telegramManifestCount: number
+    sizeBytes: number
+    retentionCount: number
+    error: string | null
+    restoredAt?: string | null
+    restoredBy?: string | null
+}
+
+export interface BackupHealth {
+    status: 'healthy' | 'warning' | 'error'
+    lastSuccessfulBackupAt: string | null
+    lastFailedBackupAt: string | null
+    nextScheduledBackupAt: string | null
+    retentionCount: number
+    availableBackups: number
+}
+
+export interface SystemHealthSnapshot {
+    checkedAt: string
+    overallStatus: 'healthy' | 'degraded' | 'down'
+    uptimeSeconds: number
+    redis: {
+        status: string
+        connected: boolean
+        latencyMs: number | null
+        keyCount: number
+    }
+    telegram: {
+        healthy: number
+        degraded: number
+        disconnected: number
+        total: number
+    }
+    backups: BackupHealth
+    queues: QueueSummary[]
+    projects: {
+        total: number
+        active: number
+        warmingUp: number
+        warmupFailed: number
+    }
+}
+
 // ─── Pending Operation (WAL) ─────────────────────────────────
 
 /** Pending operation for the Write-Ahead Cache */

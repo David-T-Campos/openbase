@@ -37,6 +37,9 @@ JWT_SECRET=replace-me
 STORAGE_SECRET=replace-me-too
 REDIS_URL=redis://redis:6379
 SQLITE_BASE_PATH=./data/indexes
+BACKUP_ROOT_PATH=./data/backups
+BACKUP_INTERVAL_MINUTES=720
+BACKUP_RETENTION_COUNT=10
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=replace-with-telegram-api-hash
 DASHBOARD_URL=https://openbase.example.com
@@ -51,6 +54,7 @@ Optional:
 - `RESEND_API_KEY` and `RESEND_FROM_EMAIL` if you want email magic links
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` if you want Google OAuth
 - `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` if you want GitHub OAuth
+- `BACKUP_ROOT_PATH`, `BACKUP_INTERVAL_MINUTES`, and `BACKUP_RETENTION_COUNT` if you want to change the default operator backup schedule or storage location
 
 For the dashboard, create `apps/dashboard/.env.local`:
 
@@ -65,6 +69,7 @@ Notes:
 - `API_PUBLIC_URL` defaults to `http://localhost:3001` only in development.
 - When `NODE_ENV=production`, `API_PUBLIC_URL` must be set explicitly or the API will refuse to start.
 - `DASHBOARD_URL` and `API_PUBLIC_URL` are both used in the production CORS allowlist and OAuth callback validation.
+- The operator dashboard uses the backup settings above to schedule snapshots and enforce retention automatically.
 
 ## Running with Docker Compose
 

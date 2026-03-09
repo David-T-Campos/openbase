@@ -13,7 +13,7 @@ import { buildErrorEnvelope, validateOutputEnvelope } from './http/response.js'
 import { RequestLogService } from './logs/index.js'
 import { createRateLimiter } from './middleware/index.js'
 import { MigrationService } from './migrations/index.js'
-import { OperationsLogService } from './ops/index.js'
+import { BackupService, OperationsLogService, SystemHealthService } from './ops/index.js'
 import { PlatformUserRepository } from './platform/index.js'
 import { ProjectService } from './projects/index.js'
 import { RealtimeService } from './realtime/RealtimeService.js'
@@ -22,6 +22,7 @@ import {
     registerAuthRoutes,
     registerDatabaseRoutes,
     registerMigrationRoutes,
+    registerOpsRoutes,
     registerPlatformRoutes,
     registerProjectRoutes,
     registerStorageRoutes,
@@ -54,6 +55,8 @@ export interface AppContext {
     projectAccessService: ProjectAccessService
     requestLogService: RequestLogService
     operationsLogService: OperationsLogService
+    backupService: BackupService
+    systemHealthService: SystemHealthService
     webhookService: WebhookService
     sessionPool: TelegramSessionPool
     realtimeBridge: TelegramRealtimeBridge
@@ -223,6 +226,35 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         encryptionService,
         masterKey,
     })
+    const backupService = new BackupService(
+        redis,
+        projectService,
+        sessionPool,
+        config.SQLITE_BASE_PATH,
+        {
+            backupRootPath: config.BACKUP_ROOT_PATH,
+            intervalMs: config.BACKUP_INTERVAL_MINUTES * 60_000,
+            retentionCount: config.BACKUP_RETENTION_COUNT,
+            operationsLogService,
+            beforeRestore: async () => {
+                await Promise.all([...indexManagers.values()].map(manager => manager.close()))
+                indexManagers.clear()
+                await platformUserRepository.close()
+            },
+            afterRestore: async () => {
+                await platformUserRepository.reopen()
+            },
+        }
+    )
+    await backupService.start()
+    const systemHealthService = new SystemHealthService(
+        redis,
+        projectService,
+        sessionPool,
+        backupService,
+        warmupService,
+        webhookService
+    )
 
     app.setErrorHandler((error, _request, reply) => {
         const statusCode = (error as { statusCode?: number }).statusCode || 500
@@ -285,6 +317,8 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
             metadata: {
                 statusCode,
                 durationMs: Math.max(0, Date.now() - startedAt),
+                actorUserId: request.user?.sub ?? null,
+                actorRole: request.user?.role ?? null,
             },
             timestamp,
         }).catch(() => undefined)
@@ -323,6 +357,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
     registerStorageRoutes(app, storageService, uploadSessionService, projectService, projectAccessService, authService)
     registerTransactionRoutes(app, projectService, projectAccessService, authService, transactionService)
     registerProjectRoutes(app, projectService, projectAccessService, warmupService, requestLogService, webhookService, operationsLogService, sessionPool)
+    registerOpsRoutes(app, operationsLogService, sessionPool, backupService, systemHealthService, warmupService, webhookService)
     registerPlatformRoutes(
         app,
         redis,
@@ -337,6 +372,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         await realtimeBridge.close()
         await warmupService.close()
         await webhookService.close()
+        await backupService.close()
         await sessionPool.close()
         await platformUserRepository.close()
         await redis.quit()
@@ -351,6 +387,8 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         projectAccessService,
         requestLogService,
         operationsLogService,
+        backupService,
+        systemHealthService,
         webhookService,
         sessionPool,
         realtimeBridge,

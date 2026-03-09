@@ -1,6 +1,6 @@
 'use client'
 
-import { telegramSessionHealthSchema, webhookConfigSchema } from '@openbase/core'
+import { telegramSessionHealthSchema, warmupStatusSchema, webhookConfigSchema } from '@openbase/core'
 import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { z } from 'zod'
@@ -18,6 +18,7 @@ const projectSchema = z.object({
 
 type WebhookConfig = z.infer<typeof webhookConfigSchema>
 type SessionHealth = z.infer<typeof telegramSessionHealthSchema>
+type WarmupStatus = z.infer<typeof warmupStatusSchema>
 
 export default function SettingsPage() {
     const params = useParams()
@@ -28,6 +29,7 @@ export default function SettingsPage() {
     const [serviceKey, setServiceKey] = useState('')
     const [projectStatus, setProjectStatus] = useState('unknown')
     const [sessionHealth, setSessionHealth] = useState<SessionHealth | null>(null)
+    const [warmupStatus, setWarmupStatus] = useState<WarmupStatus | null>(null)
     const [showServiceKey, setShowServiceKey] = useState(false)
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
     const [deleteLoading, setDeleteLoading] = useState(false)
@@ -38,6 +40,7 @@ export default function SettingsPage() {
     const [webhookEvents, setWebhookEvents] = useState<Array<'INSERT' | 'UPDATE' | 'DELETE'>>(['INSERT', 'UPDATE', 'DELETE'])
     const [webhookLoading, setWebhookLoading] = useState(false)
     const [webhookError, setWebhookError] = useState('')
+    const [warmupLoading, setWarmupLoading] = useState(false)
 
     useEffect(() => {
         void loadSettings()
@@ -45,18 +48,20 @@ export default function SettingsPage() {
 
     const loadSettings = async () => {
         try {
-            const [keysResponse, projectResponse, webhookResponse, sessionResponse] = await Promise.all([
+            const [keysResponse, projectResponse, webhookResponse, sessionResponse, warmupResponse] = await Promise.all([
                 authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/keys`),
                 authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}`),
                 authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/webhooks`),
                 authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/telegram/session`),
+                authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/status`),
             ])
 
-            const [keysData, projectData, webhookData, sessionData] = await Promise.all([
+            const [keysData, projectData, webhookData, sessionData, warmupData] = await Promise.all([
                 readApiEnvelope(keysResponse, keysSchema),
                 readApiEnvelope(projectResponse, projectSchema),
                 readApiEnvelope(webhookResponse, z.array(webhookConfigSchema)),
                 readApiEnvelope(sessionResponse, telegramSessionHealthSchema.nullable()),
+                readApiEnvelope(warmupResponse, warmupStatusSchema),
             ])
 
             setAnonKey(keysData.anonKey)
@@ -64,6 +69,7 @@ export default function SettingsPage() {
             setProjectStatus(projectData.status || 'unknown')
             setWebhooks(webhookData)
             setSessionHealth(sessionData)
+            setWarmupStatus(warmupData)
         } catch (error) {
             setWebhookError((error as Error).message)
         }
@@ -80,6 +86,48 @@ export default function SettingsPage() {
             degraded,
         }
     }, [webhooks])
+
+    const handleWarmupOverride = async (mode: 'default' | 'paused' | 'force_active') => {
+        setWarmupLoading(true)
+        setWebhookError('')
+
+        try {
+            const response = await authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/warmup`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode }),
+            })
+            const data = await readApiEnvelope(response, warmupStatusSchema.nullable())
+            setWarmupStatus(data)
+            if (data?.status) {
+                setProjectStatus(data.status)
+            }
+        } catch (error) {
+            setWebhookError((error as Error).message)
+        } finally {
+            setWarmupLoading(false)
+        }
+    }
+
+    const handleWarmupTick = async () => {
+        setWarmupLoading(true)
+        setWebhookError('')
+
+        try {
+            const response = await authenticatedFetch(`${getApiUrl()}/api/v1/projects/${projectId}/warmup/tick`, {
+                method: 'POST',
+            })
+            const data = await readApiEnvelope(response, warmupStatusSchema.nullable())
+            setWarmupStatus(data)
+            if (data?.status) {
+                setProjectStatus(data.status)
+            }
+        } catch (error) {
+            setWebhookError((error as Error).message)
+        } finally {
+            setWarmupLoading(false)
+        }
+    }
 
     const handleDeleteProject = async () => {
         setDeleteLoading(true)
@@ -293,6 +341,63 @@ export default function SettingsPage() {
                     )}
                 </section>
             </div>
+
+            <section className="panel mt-6 p-6">
+                <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                        <div className="text-lg font-semibold text-white">Warmup controls</div>
+                        <p className="mt-2 max-w-2xl text-sm leading-7 subtle">
+                            Override warmup when a project needs to pause queued activity, resume normal scheduling, or force activation.
+                        </p>
+                    </div>
+
+                    <div className="flex flex-wrap gap-3">
+                        <button type="button" onClick={() => handleWarmupOverride('default')} disabled={warmupLoading} className="btn btn-secondary">
+                            Default
+                        </button>
+                        <button type="button" onClick={() => handleWarmupOverride('paused')} disabled={warmupLoading} className="btn btn-secondary">
+                            Pause
+                        </button>
+                        <button type="button" onClick={() => handleWarmupOverride('force_active')} disabled={warmupLoading} className="btn btn-secondary">
+                            Force active
+                        </button>
+                        <button type="button" onClick={handleWarmupTick} disabled={warmupLoading} className="btn btn-primary">
+                            Run tick now
+                        </button>
+                    </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 md:grid-cols-4">
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Override</div>
+                        <div className="mt-2 text-lg font-semibold capitalize text-white">
+                            {(warmupStatus?.overrideMode || 'default').replace('_', ' ')}
+                        </div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Progress</div>
+                        <div className="mt-2 text-lg font-semibold text-white">
+                            {warmupStatus?.percentComplete ?? 0}%
+                        </div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Days remaining</div>
+                        <div className="mt-2 text-lg font-semibold text-white">{warmupStatus?.daysRemaining ?? 0}</div>
+                    </div>
+                    <div className="panel-soft px-4 py-4">
+                        <div className="text-xs uppercase tracking-[0.14em] subtle">Next scheduled tick</div>
+                        <div className="mt-2 text-sm subtle-strong">
+                            {warmupStatus?.nextScheduledAt ? new Date(warmupStatus.nextScheduledAt).toLocaleString() : 'Pending'}
+                        </div>
+                    </div>
+                </div>
+
+                {warmupStatus?.lastError && (
+                    <div className="mt-5 rounded-[10px] border border-[rgba(239,111,108,0.24)] bg-[rgba(239,111,108,0.08)] px-4 py-3 text-sm text-[#f3b2af]">
+                        {warmupStatus.lastError}
+                    </div>
+                )}
+            </section>
 
             <section className="panel mt-6 p-6">
                 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">

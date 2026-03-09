@@ -38,6 +38,9 @@ const envSchema = z.object({
 
     // SQLite
     SQLITE_BASE_PATH: z.string().default('./data/indexes'),
+    BACKUP_ROOT_PATH: z.string().default('./data/backups'),
+    BACKUP_INTERVAL_MINUTES: z.coerce.number().int().nonnegative().default(720),
+    BACKUP_RETENTION_COUNT: z.coerce.number().int().positive().default(10),
 
     // Telegram
     TELEGRAM_API_ID: z.coerce.number().optional(),

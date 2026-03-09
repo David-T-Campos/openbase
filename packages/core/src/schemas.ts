@@ -167,6 +167,96 @@ export const telegramSessionHealthSchema = z.object({
     probeChannelId: z.string().nullable(),
 })
 
+export const queueSummarySchema = z.object({
+    name: z.enum(['warmup', 'webhooks']),
+    enabled: z.boolean(),
+    paused: z.boolean(),
+    waiting: z.number(),
+    active: z.number(),
+    delayed: z.number(),
+    failed: z.number(),
+    completed: z.number(),
+})
+
+export const queueJobSnapshotSchema = z.object({
+    queue: z.enum(['warmup', 'webhooks']),
+    id: z.string(),
+    name: z.string(),
+    state: z.enum(['waiting', 'active', 'delayed', 'failed', 'completed', 'paused']),
+    projectId: z.string().nullable(),
+    attemptsMade: z.number(),
+    attempts: z.number(),
+    timestamp: z.number(),
+    processedOn: z.number().nullable(),
+    finishedOn: z.number().nullable(),
+    delay: z.number(),
+    failedReason: z.string().nullable(),
+    data: z.record(z.unknown()),
+})
+
+export const warmupStatusSchema = z.object({
+    status: z.string(),
+    daysCompleted: z.number(),
+    daysRequired: z.number(),
+    daysRemaining: z.number(),
+    percentComplete: z.number(),
+    lastError: z.string().nullable().optional(),
+    overrideMode: z.enum(['default', 'paused', 'force_active']),
+    nextScheduledAt: z.string().nullable(),
+})
+
+export const backupRecordSchema = z.object({
+    id: z.string(),
+    createdAt: z.string(),
+    trigger: z.enum(['manual', 'scheduled']),
+    status: z.enum(['ready', 'failed']),
+    backupPath: z.string(),
+    projectCount: z.number(),
+    redisKeyCount: z.number(),
+    sqliteFileCount: z.number(),
+    telegramManifestCount: z.number(),
+    sizeBytes: z.number(),
+    retentionCount: z.number(),
+    error: z.string().nullable(),
+    restoredAt: z.string().nullable().optional(),
+    restoredBy: z.string().nullable().optional(),
+})
+
+export const backupHealthSchema = z.object({
+    status: z.enum(['healthy', 'warning', 'error']),
+    lastSuccessfulBackupAt: z.string().nullable(),
+    lastFailedBackupAt: z.string().nullable(),
+    nextScheduledBackupAt: z.string().nullable(),
+    retentionCount: z.number(),
+    availableBackups: z.number(),
+})
+
+export const systemHealthSnapshotSchema = z.object({
+    checkedAt: z.string(),
+    overallStatus: z.enum(['healthy', 'degraded', 'down']),
+    uptimeSeconds: z.number(),
+    redis: z.object({
+        status: z.string(),
+        connected: z.boolean(),
+        latencyMs: z.number().nullable(),
+        keyCount: z.number(),
+    }),
+    telegram: z.object({
+        healthy: z.number(),
+        degraded: z.number(),
+        disconnected: z.number(),
+        total: z.number(),
+    }),
+    backups: backupHealthSchema,
+    queues: z.array(queueSummarySchema),
+    projects: z.object({
+        total: z.number(),
+        active: z.number(),
+        warmingUp: z.number(),
+        warmupFailed: z.number(),
+    }),
+})
+
 export const columnDefinitionSchema = z.object({
     name: z.string(),
     type: z.enum(['text', 'number', 'boolean', 'json', 'timestamp', 'uuid']),

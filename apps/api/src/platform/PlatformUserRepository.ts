@@ -10,12 +10,18 @@ export interface PlatformUser {
 }
 
 export class PlatformUserRepository {
-    private readonly db: Database.Database
+    private db: Database.Database | null = null
+    private readonly dbPath: string
 
     constructor(dbPath: string = './data/platform.db') {
-        mkdirSync(dirname(dbPath), { recursive: true })
+        this.dbPath = dbPath
+        this.open()
+    }
 
-        this.db = new Database(dbPath)
+    private open(): void {
+        mkdirSync(dirname(this.dbPath), { recursive: true })
+
+        this.db = new Database(this.dbPath)
         this.db.pragma('journal_mode = WAL')
         this.db.pragma('synchronous = NORMAL')
         this.db.pragma('busy_timeout = 5000')
@@ -30,8 +36,16 @@ export class PlatformUserRepository {
         `)
     }
 
+    private get connection(): Database.Database {
+        if (!this.db) {
+            this.open()
+        }
+
+        return this.db!
+    }
+
     async findByEmail(email: string): Promise<PlatformUser | null> {
-        const row = this.db
+        const row = this.connection
             .prepare(`
                 SELECT id, email, password_hash, created_at
                 FROM platform_users
@@ -54,7 +68,7 @@ export class PlatformUserRepository {
     }
 
     async findById(id: string): Promise<PlatformUser | null> {
-        const row = this.db
+        const row = this.connection
             .prepare(`
                 SELECT id, email, password_hash, created_at
                 FROM platform_users
@@ -77,7 +91,7 @@ export class PlatformUserRepository {
     }
 
     async createUser(user: PlatformUser): Promise<void> {
-        this.db
+        this.connection
             .prepare(`
                 INSERT INTO platform_users (id, email, password_hash, created_at)
                 VALUES (?, ?, ?, ?)
@@ -86,6 +100,13 @@ export class PlatformUserRepository {
     }
 
     async close(): Promise<void> {
-        this.db.close()
+        this.db?.close()
+        this.db = null
+    }
+
+    async reopen(): Promise<void> {
+        if (!this.db) {
+            this.open()
+        }
     }
 }

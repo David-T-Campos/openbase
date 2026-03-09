@@ -45,6 +45,10 @@ const updateMemberSchema = z.object({
     roleKey: z.string().min(1),
 })
 
+const warmupOverrideSchema = z.object({
+    mode: z.enum(['default', 'paused', 'force_active']),
+})
+
 const roleSchema = z.object({
     key: z.string().min(1),
     name: z.string().min(1),
@@ -230,11 +234,34 @@ export function registerProjectRoutes(
                         daysRequired: 7,
                         daysRemaining: project.warmupDaysRemaining ?? 0,
                         percentComplete: project.status === 'active' ? 100 : 0,
+                        overrideMode: 'default',
+                        nextScheduledAt: null,
                     },
                 })
             }
 
             return reply.send({ data: warmupStatus })
+        }
+    )
+
+    app.patch<{ Params: { projectId: string } }>(
+        '/api/v1/projects/:projectId/warmup',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = (await assertProjectPermission(projectAccessService, request, 'settings.manage')).project
+            const body = warmupOverrideSchema.parse(request.body)
+            const status = await warmupService.setOverride(project.id, body.mode)
+            return reply.send({ data: status })
+        }
+    )
+
+    app.post<{ Params: { projectId: string } }>(
+        '/api/v1/projects/:projectId/warmup/tick',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = (await assertProjectPermission(projectAccessService, request, 'settings.manage')).project
+            const status = await warmupService.triggerTick(project.id)
+            return reply.send({ data: status })
         }
     )
 
@@ -475,32 +502,6 @@ export function registerProjectRoutes(
         }
     )
 
-    app.get('/health', async (_request, reply) => {
-        return reply.send({
-            data: {
-                status: 'ok',
-                timestamp: new Date().toISOString(),
-                version: '0.1.0',
-            },
-        })
-    })
-
-    app.get(
-        '/api/v1/ops/logs',
-        { preHandler: [platformAuthMiddleware] },
-        async (_request, reply) => {
-            const logs = await operationsLogService.listGlobal(200)
-            return reply.send({ data: logs })
-        }
-    )
-
-    app.get(
-        '/api/v1/ops/telegram/sessions',
-        { preHandler: [platformAuthMiddleware] },
-        async (_request, reply) => {
-            return reply.send({ data: telegramSessionPool.listHealth() })
-        }
-    )
 }
 
 async function assertProjectPermission(
