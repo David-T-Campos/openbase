@@ -1,28 +1,48 @@
-/**
- * RealtimeClient — Socket.io client for realtime subscriptions.
- */
-
 import { io, type Socket } from 'socket.io-client'
-import type { RealtimePayload, RealtimeSubscription } from './types.js'
+import type {
+    PresenceEventPayload,
+    PresenceMeta,
+    PresenceState,
+    RealtimePayload,
+    RealtimePostgresChangesFilter,
+    RealtimeSubscription,
+} from './types.js'
+
+type TableEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+type RealtimeHandlerMode = 'legacy' | 'postgres_changes'
 
 interface SubscriptionDescriptor {
     id: string
+    schema: string
     table: string
-    eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+    eventType: TableEventType
     callback: (payload: RealtimePayload) => void
+    mode: RealtimeHandlerMode
+}
+
+interface BroadcastPayload {
+    channel?: string
+    event: string
+    payload: unknown
+}
+
+interface PresenceRoomState {
+    handlers: Set<(payload: PresenceEventPayload) => void>
+    state: PresenceState
+    joined: boolean
 }
 
 export class RealtimeClient {
     private socket: Socket | null = null
     private descriptors = new Map<string, SubscriptionDescriptor>()
-    private broadcastHandlers = new Map<string, Set<(payload: { channel?: string; event: string; payload: unknown }) => void>>()
-    private presenceHandlers = new Map<string, Set<(payload: { userId: string; status: string; timestamp: number }) => void>>()
+    private broadcastHandlers = new Map<string, Set<(payload: BroadcastPayload) => void>>()
+    private presenceRooms = new Map<string, PresenceRoomState>()
 
     constructor(
-        private projectUrl: string,
-        private projectId: string,
-        private getAccessToken: () => string | null,
-        private getApiKey: () => string
+        private readonly projectUrl: string,
+        private readonly projectId: string,
+        private readonly getAccessToken: () => string | null,
+        private readonly getApiKey: () => string
     ) { }
 
     channel(name: string): RealtimeChannel {
@@ -39,7 +59,14 @@ export class RealtimeClient {
         })
 
         this.socket.on('connect', () => {
+            const subscribed = new Set<string>()
             for (const descriptor of this.descriptors.values()) {
+                const key = this.getDescriptorKey(descriptor)
+                if (subscribed.has(key)) {
+                    continue
+                }
+
+                subscribed.add(key)
                 this.emitSubscribe(descriptor)
             }
 
@@ -47,15 +74,12 @@ export class RealtimeClient {
                 this.socket?.emit('join_broadcast', {
                     projectId: this.projectId,
                     channel,
-                    token: this.getAccessToken() || this.getApiKey(),
+                    token: this.getAuthToken(),
                 })
             }
 
-            if (this.presenceHandlers.size > 0) {
-                this.socket?.emit('join_presence', {
-                    projectId: this.projectId,
-                    token: this.getAccessToken() || this.getApiKey(),
-                })
+            for (const channel of this.presenceRooms.keys()) {
+                this.emitJoinPresence(channel)
             }
         })
 
@@ -63,13 +87,14 @@ export class RealtimeClient {
             if (!this.isRealtimeEvent(eventName)) return
 
             for (const descriptor of this.descriptors.values()) {
+                if (descriptor.schema !== payload.schema) continue
                 if (descriptor.table !== payload.table) continue
                 if (descriptor.eventType !== '*' && descriptor.eventType !== eventName) continue
                 descriptor.callback(payload)
             }
         })
 
-        this.socket.on('broadcast', (payload: { channel?: string; event: string; payload: unknown }) => {
+        this.socket.on('broadcast', (payload: BroadcastPayload) => {
             for (const [channel, handlers] of this.broadcastHandlers.entries()) {
                 if (payload.channel && payload.channel !== channel) {
                     continue
@@ -81,12 +106,30 @@ export class RealtimeClient {
             }
         })
 
-        this.socket.on('presence_update', (payload: { userId: string; status: string; timestamp: number }) => {
-            for (const handlers of this.presenceHandlers.values()) {
-                for (const handler of handlers) {
-                    handler(payload)
-                }
+        this.socket.on('presence_state', (payload: { channel: string; state: PresenceState }) => {
+            const room = this.getPresenceRoom(payload.channel)
+            if (!room) {
+                return
             }
+
+            room.state = clonePresenceState(payload.state)
+            this.emitPresenceSync(payload.channel)
+        })
+
+        this.socket.on('presence_diff', (payload: {
+            channel: string
+            joins: PresenceState
+            leaves: PresenceState
+        }) => {
+            const room = this.getPresenceRoom(payload.channel)
+            if (!room) {
+                return
+            }
+
+            const nextState = applyPresenceDiff(room.state, payload.joins, payload.leaves)
+            room.state = nextState
+            this.emitPresenceDiff(payload.channel, 'leave', payload.leaves, nextState)
+            this.emitPresenceDiff(payload.channel, 'join', payload.joins, nextState)
         })
     }
 
@@ -96,42 +139,39 @@ export class RealtimeClient {
     }
 
     subscribeToTable(
+        schema: string,
         table: string,
-        eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*',
-        callback: (payload: RealtimePayload) => void
+        eventType: TableEventType,
+        callback: (payload: RealtimePayload) => void,
+        mode: RealtimeHandlerMode = 'legacy'
     ): RealtimeSubscription {
         this.connect()
 
         const id = `${table}:${eventType}:${Math.random().toString(36).slice(2)}`
-        const descriptor: SubscriptionDescriptor = { id, table, eventType, callback }
+        const descriptor: SubscriptionDescriptor = { id, schema, table, eventType, callback, mode }
+        const shouldSubscribe = !this.hasMatchingDescriptor(descriptor)
         this.descriptors.set(id, descriptor)
-        this.emitSubscribe(descriptor)
+        if (shouldSubscribe) {
+            this.emitSubscribe(descriptor)
+        }
 
         return {
             unsubscribe: () => {
                 this.descriptors.delete(id)
-                this.socket?.emit('unsubscribe', {
-                    projectId: this.projectId,
-                    table,
-                })
+                if (!this.hasMatchingDescriptor(descriptor)) {
+                    this.socket?.emit('unsubscribe', {
+                        projectId: this.projectId,
+                        table,
+                        event: eventType,
+                    })
+                }
             },
         }
     }
 
-    private emitSubscribe(descriptor: SubscriptionDescriptor): void {
-        if (!this.socket?.connected) return
-
-        this.socket.emit('subscribe', {
-            projectId: this.projectId,
-            table: descriptor.table,
-            event: descriptor.eventType,
-            token: this.getAccessToken() || this.getApiKey(),
-        })
-    }
-
     subscribeToBroadcast(
         channel: string,
-        callback: (payload: { channel?: string; event: string; payload: unknown }) => void
+        callback: (payload: BroadcastPayload) => void
     ): RealtimeSubscription {
         this.connect()
 
@@ -143,14 +183,14 @@ export class RealtimeClient {
             this.socket.emit('join_broadcast', {
                 projectId: this.projectId,
                 channel,
-                token: this.getAccessToken() || this.getApiKey(),
+                token: this.getAuthToken(),
             })
         } else {
             this.socket?.once('connect', () => {
                 this.socket?.emit('join_broadcast', {
                     projectId: this.projectId,
                     channel,
-                    token: this.getAccessToken() || this.getApiKey(),
+                    token: this.getAuthToken(),
                 })
             })
         }
@@ -168,34 +208,33 @@ export class RealtimeClient {
 
     subscribeToPresence(
         channel: string,
-        callback: (payload: { userId: string; status: string; timestamp: number }) => void
+        callback: (payload: PresenceEventPayload) => void
     ): RealtimeSubscription {
         this.connect()
 
-        const handlers = this.presenceHandlers.get(channel) || new Set()
-        handlers.add(callback)
-        this.presenceHandlers.set(channel, handlers)
+        const room = this.getOrCreatePresenceRoom(channel)
+        room.handlers.add(callback)
 
-        if (this.socket?.connected) {
-            this.socket.emit('join_presence', {
-                projectId: this.projectId,
-                token: this.getAccessToken() || this.getApiKey(),
-            })
-        } else {
+        if (this.socket?.connected && !room.joined) {
+            this.emitJoinPresence(channel)
+        } else if (!room.joined) {
             this.socket?.once('connect', () => {
-                this.socket?.emit('join_presence', {
-                    projectId: this.projectId,
-                    token: this.getAccessToken() || this.getApiKey(),
-                })
+                this.emitJoinPresence(channel)
             })
         }
 
         return {
             unsubscribe: () => {
-                const current = this.presenceHandlers.get(channel)
-                current?.delete(callback)
-                if (current && current.size === 0) {
-                    this.presenceHandlers.delete(channel)
+                const current = this.presenceRooms.get(channel)
+                current?.handlers.delete(callback)
+                if (current && current.handlers.size === 0) {
+                    current.joined = false
+                    this.presenceRooms.delete(channel)
+                    this.socket?.emit('leave_presence', {
+                        projectId: this.projectId,
+                        channel,
+                        token: this.getAuthToken(),
+                    })
                 }
             },
         }
@@ -208,21 +247,138 @@ export class RealtimeClient {
             channel,
             event,
             payload,
-            token: this.getAccessToken() || this.getApiKey(),
+            token: this.getAuthToken(),
         })
     }
 
-    trackPresence(userId: string, status: string): void {
+    trackPresence(channel: string, userId: string, status: string): void {
         this.connect()
         this.socket?.emit('presence', {
             projectId: this.projectId,
+            channel,
             userId,
             status,
-            token: this.getAccessToken() || this.getApiKey(),
+            token: this.getAuthToken(),
         })
     }
 
-    private isRealtimeEvent(eventName: string): eventName is 'INSERT' | 'UPDATE' | 'DELETE' | '*' {
+    private emitSubscribe(descriptor: SubscriptionDescriptor): void {
+        if (!this.socket?.connected) return
+
+        this.socket.emit('subscribe', {
+            projectId: this.projectId,
+            table: descriptor.table,
+            event: descriptor.eventType,
+            token: this.getAuthToken(),
+        })
+    }
+
+    private emitJoinPresence(channel: string): void {
+        const room = this.getPresenceRoom(channel)
+        if (!room) {
+            return
+        }
+
+        room.joined = true
+        this.socket?.emit('join_presence', {
+            projectId: this.projectId,
+            channel,
+            token: this.getAuthToken(),
+        })
+    }
+
+    private emitPresenceSync(channel: string): void {
+        const room = this.getPresenceRoom(channel)
+        if (!room) {
+            return
+        }
+
+        const snapshot = clonePresenceState(room.state)
+        const handlers = [...room.handlers]
+
+        const payload: PresenceEventPayload = {
+            channel,
+            event: 'sync',
+            state: snapshot,
+        }
+        for (const handler of handlers) {
+            handler(payload)
+        }
+    }
+
+    private emitPresenceDiff(
+        channel: string,
+        event: 'join' | 'leave',
+        diff: PresenceState,
+        nextState: PresenceState
+    ): void {
+        const room = this.getPresenceRoom(channel)
+        if (!room || Object.keys(diff).length === 0) {
+            return
+        }
+
+        const handlers = [...room.handlers]
+        const snapshot = clonePresenceState(nextState)
+
+        for (const meta of flattenPresenceState(diff)) {
+            const payload: PresenceEventPayload = {
+                channel,
+                event,
+                userId: meta.user_id,
+                status: meta.status,
+                timestamp: meta.timestamp,
+                state: snapshot,
+            }
+
+            for (const handler of handlers) {
+                handler(payload)
+            }
+        }
+    }
+
+    private getOrCreatePresenceRoom(channel: string): PresenceRoomState {
+        const existing = this.presenceRooms.get(channel)
+        if (existing) {
+            return existing
+        }
+
+        const created: PresenceRoomState = {
+            handlers: new Set(),
+            state: {},
+            joined: false,
+        }
+        this.presenceRooms.set(channel, created)
+        return created
+    }
+
+    private getPresenceRoom(channel: string): PresenceRoomState | undefined {
+        return this.presenceRooms.get(channel)
+    }
+
+    private getAuthToken(): string {
+        return this.getAccessToken() || this.getApiKey()
+    }
+
+    private hasMatchingDescriptor(descriptor: Pick<SubscriptionDescriptor, 'schema' | 'table' | 'eventType' | 'id'>): boolean {
+        for (const current of this.descriptors.values()) {
+            if (current.id === descriptor.id) {
+                continue
+            }
+
+            if (this.getDescriptorKey(current) === this.getDescriptorKey(descriptor)) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private getDescriptorKey(descriptor: Pick<SubscriptionDescriptor, 'schema' | 'table' | 'eventType'>): string {
+        const roomType = descriptor.eventType === '*' ? '*' : 'table'
+        return `${descriptor.schema}:${descriptor.table}:${roomType}`
+    }
+
+    private isRealtimeEvent(eventName: string): eventName is TableEventType {
         return eventName === 'INSERT'
             || eventName === 'UPDATE'
             || eventName === 'DELETE'
@@ -232,41 +388,68 @@ export class RealtimeClient {
 
 export class RealtimeChannel {
     private handlers: Array<{
+        schema: string
         table: string
-        eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+        eventType: TableEventType
         callback: (payload: RealtimePayload) => void
+        mode: RealtimeHandlerMode
     }> = []
-    private broadcastCallbacks: Array<(payload: { channel?: string; event: string; payload: unknown }) => void> = []
-    private presenceCallbacks: Array<(payload: { userId: string; status: string; timestamp: number }) => void> = []
+    private broadcastCallbacks: Array<(payload: BroadcastPayload) => void> = []
+    private presenceCallbacks: Array<(payload: PresenceEventPayload) => void> = []
 
     constructor(
-        private name: string,
-        private client: RealtimeClient
+        private readonly name: string,
+        private readonly client: RealtimeClient
     ) { }
 
     on(
-        eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*',
+        eventType: TableEventType,
         filter: { event: string; schema?: string; table?: string } | string,
         callback: (payload: RealtimePayload) => void
+    ): this
+    on(
+        eventType: 'postgres_changes',
+        filter: RealtimePostgresChangesFilter,
+        callback: (payload: RealtimePayload) => void
+    ): this
+    on(
+        eventType: TableEventType | 'postgres_changes',
+        filter: { event: string; schema?: string; table?: string } | RealtimePostgresChangesFilter | string,
+        callback: (payload: RealtimePayload) => void
     ): this {
+        if (eventType === 'postgres_changes') {
+            const postgresFilter = filter as RealtimePostgresChangesFilter
+            const table = postgresFilter.table || this.name
+            const postgresEvent = postgresFilter.event || '*'
+            this.handlers.push({
+                schema: postgresFilter.schema || 'public',
+                table,
+                eventType: postgresEvent,
+                callback,
+                mode: 'postgres_changes',
+            })
+            return this
+        }
+
         const table = typeof filter === 'string' ? filter : filter.table || this.name
-        this.handlers.push({ table, eventType, callback })
+        const schema = typeof filter === 'string' ? 'public' : filter.schema || 'public'
+        this.handlers.push({ schema, table, eventType, callback, mode: 'legacy' })
         return this
     }
 
-    onBroadcast(callback: (payload: { channel?: string; event: string; payload: unknown }) => void): this {
+    onBroadcast(callback: (payload: BroadcastPayload) => void): this {
         this.broadcastCallbacks.push(callback)
         return this
     }
 
-    onPresence(callback: (payload: { userId: string; status: string; timestamp: number }) => void): this {
+    onPresence(callback: (payload: PresenceEventPayload) => void): this {
         this.presenceCallbacks.push(callback)
         return this
     }
 
     subscribe(): RealtimeSubscription {
         const subscriptions = this.handlers.map(handler =>
-            this.client.subscribeToTable(handler.table, handler.eventType, handler.callback)
+            this.client.subscribeToTable(handler.schema, handler.table, handler.eventType, handler.callback, handler.mode)
         )
         const broadcastSubscriptions = this.broadcastCallbacks.map(callback =>
             this.client.subscribeToBroadcast(this.name, callback)
@@ -290,7 +473,52 @@ export class RealtimeChannel {
     }
 
     track(userId: string, status: string): this {
-        this.client.trackPresence(userId, status)
+        this.client.trackPresence(this.name, userId, status)
         return this
     }
+}
+
+function applyPresenceDiff(
+    current: PresenceState,
+    joins: PresenceState,
+    leaves: PresenceState
+): PresenceState {
+    const next = clonePresenceState(current)
+
+    for (const [key, entry] of Object.entries(leaves)) {
+        const existing = next[key]?.metas ?? []
+        const remaining = existing.filter(meta =>
+            !entry.metas.some(removed => removed.phx_ref === meta.phx_ref)
+        )
+
+        if (remaining.length > 0) {
+            next[key] = { metas: remaining }
+        } else {
+            delete next[key]
+        }
+    }
+
+    for (const [key, entry] of Object.entries(joins)) {
+        const existing = next[key]?.metas ?? []
+        next[key] = {
+            metas: [...existing, ...entry.metas],
+        }
+    }
+
+    return next
+}
+
+function flattenPresenceState(state: PresenceState): PresenceMeta[] {
+    return Object.values(state).flatMap(entry => entry.metas)
+}
+
+function clonePresenceState(state: PresenceState): PresenceState {
+    return Object.fromEntries(
+        Object.entries(state).map(([key, entry]) => [
+            key,
+            {
+                metas: entry.metas.map(meta => ({ ...meta })),
+            },
+        ])
+    )
 }

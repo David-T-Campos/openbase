@@ -45,12 +45,20 @@ const query = openbase.from('posts')
 
 The query builder is awaitable and follows a Supabase-style chain API.
 
-### `select(columns = '*')`
+### `select(columns = '*', options?)`
 
 Select rows from a table.
 
 ```ts
 const { data, error } = await openbase.from('posts').select('*')
+```
+
+Use `options.count` to request a row count and `options.head` to return only the count payload.
+
+```ts
+const { count } = await openbase
+  .from('posts')
+  .select('*', { count: 'exact', head: true })
 ```
 
 ### Filter methods
@@ -230,6 +238,17 @@ const { data, error } = await openbase.auth.signInWithPassword({
 ```
 
 If MFA is enabled for the account, the response may require an MFA challenge flow. The client currently accepts `mfa_code` in this method when the backend expects it.
+
+### `signIn({ email, password, mfa_code? })`
+
+Alias for `signInWithPassword` for Supabase-style ergonomics.
+
+```ts
+const { data, error } = await openbase.auth.signIn({
+  email: 'alice@example.com',
+  password: 'super-secret-password',
+})
+```
 
 ### `signInWithOtp({ email })`
 
@@ -417,7 +436,22 @@ const channel = openbase.channel('posts')
 
 ### Subscribe to table changes
 
-Use `.on(eventType, filter, callback).subscribe()` on a realtime channel.
+Use `.on('postgres_changes', filter, callback).subscribe()` on a realtime channel for the Supabase-style API.
+
+```ts
+const subscription = openbase
+  .channel('posts-feed')
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'posts',
+  }, payload => {
+    console.log('insert', payload.new)
+  })
+  .subscribe()
+```
+
+Legacy event names are also supported:
 
 ```ts
 const subscription = openbase
@@ -465,10 +499,17 @@ Subscribe to presence updates:
 openbase
   .channel('presence-room')
   .onPresence(payload => {
+    if (payload.event === 'sync') {
+      console.log(payload.state)
+      return
+    }
+
     console.log(payload.userId, payload.status)
   })
   .subscribe()
 ```
+
+Presence state is isolated per channel. Joining, leaving, and syncing one channel does not affect another.
 
 Publish presence:
 

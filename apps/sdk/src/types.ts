@@ -41,6 +41,34 @@ export interface RealtimePayload<T = Record<string, unknown>> {
     old: T | null
 }
 
+export interface RealtimePostgresChangesFilter {
+    event: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+    schema?: string
+    table?: string
+}
+
+export interface PresenceMeta {
+    phx_ref: string
+    user_id: string
+    status: string
+    timestamp: number
+}
+
+export interface PresenceState {
+    [key: string]: {
+        metas: PresenceMeta[]
+    }
+}
+
+export interface PresenceEventPayload {
+    channel: string
+    event: 'sync' | 'join' | 'leave'
+    userId?: string
+    status?: string
+    timestamp?: number
+    state: PresenceState
+}
+
 /** Realtime subscription */
 export interface RealtimeSubscription {
     unsubscribe: () => void
@@ -55,6 +83,11 @@ export interface QueryFilter {
 
 export interface UpsertOptions {
     onConflict?: string | string[]
+}
+
+export interface SelectOptions {
+    count?: 'exact' | 'planned' | 'estimated'
+    head?: boolean
 }
 
 /** Upload options */

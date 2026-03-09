@@ -7,7 +7,7 @@
         "build": "rimraf .next && next build",
         "start": "next start",
         "typecheck": "tsc --noEmit",
-        "lint": "next lint"
+        "lint": "eslint . --ext .js,.jsx,.ts,.tsx --max-warnings=0"
     },
     "dependencies": {
         "next": "^14.2.0",

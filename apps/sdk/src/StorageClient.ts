@@ -93,7 +93,7 @@ class StorageBucketClient {
                     headers: {
                         'Authorization': `Bearer ${token}`,
                         'apikey': this.apiKey,
-                        ...(Boolean(_options?.upsert) ? { 'x-upsert': 'true' } : {}),
+                        ...(_options?.upsert ? { 'x-upsert': 'true' } : {}),
                     },
                     body: formData,
                 }

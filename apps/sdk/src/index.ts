@@ -137,8 +137,13 @@ export type {
     QueryResult,
     AuthResult,
     RealtimePayload,
+    RealtimePostgresChangesFilter,
     RealtimeSubscription,
     QueryFilter,
+    SelectOptions,
+    PresenceMeta,
+    PresenceState,
+    PresenceEventPayload,
     UploadOptions,
     TransformOptions,
 } from './types.js'

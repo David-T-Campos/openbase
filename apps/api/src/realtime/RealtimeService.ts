@@ -9,20 +9,33 @@ interface RealtimeOptions {
     allowedOrigins?: Set<string>
 }
 
+type TableEventType = 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+
 interface TableSubscription {
     room: string
     projectId: string
     table: string
-    eventType: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+    eventType: TableEventType
     user: JWTPayload
     selectPolicy?: RLSPolicy
     bypassRLS: boolean
 }
 
+interface PresenceMeta {
+    phx_ref: string
+    user_id: string
+    status: string
+    timestamp: number
+}
+
+type PresenceState = Record<string, { metas: PresenceMeta[] }>
+
 export class RealtimeService {
-    private io: Server
-    private channelToTable: Map<string, { projectId: string; tableName: string }> = new Map()
-    private subscriptions = new Map<string, Map<string, TableSubscription>>()
+    private readonly io: Server
+    private readonly channelToTable: Map<string, { projectId: string; tableName: string }> = new Map()
+    private readonly subscriptions = new Map<string, Map<string, TableSubscription>>()
+    private readonly presenceRooms = new Map<string, Map<string, Map<string, PresenceMeta>>>()
+    private readonly socketPresenceRooms = new Map<string, Set<string>>()
 
     constructor(
         httpServer: HttpServer,
@@ -74,8 +87,8 @@ export class RealtimeService {
             old: oldRow,
         }
 
-        this.emitTableEvent(`project:${projectId}:table:${tableName}`, eventType, payload, newRow, oldRow)
-        this.emitTableEvent(`project:${projectId}:table:${tableName}:*`, '*', payload, newRow, oldRow)
+        this.emitTableEvent(this.getTableRoom(projectId, tableName, eventType), eventType, payload, newRow, oldRow)
+        this.emitTableEvent(this.getTableRoom(projectId, tableName, '*'), '*', payload, newRow, oldRow)
     }
 
     getIO(): Server {
@@ -87,7 +100,7 @@ export class RealtimeService {
             socket.on('subscribe', async (data: {
                 projectId: string
                 table: string
-                event: 'INSERT' | 'UPDATE' | 'DELETE' | '*'
+                event: TableEventType
                 token?: string
             }) => {
                 const auth = await this.authorizeTableSubscription(data.projectId, data.table, data.token)
@@ -96,7 +109,7 @@ export class RealtimeService {
                     return
                 }
 
-                const room = `project:${data.projectId}:table:${data.table}${data.event === '*' ? ':*' : ''}`
+                const room = this.getTableRoom(data.projectId, data.table, data.event)
                 socket.join(room)
                 this.storeSubscription(socket.id, {
                     room,
@@ -110,28 +123,81 @@ export class RealtimeService {
                 socket.emit('subscribed', { room })
             })
 
-            socket.on('unsubscribe', (data: { projectId: string; table: string }) => {
-                this.removeSubscription(socket.id, `project:${data.projectId}:table:${data.table}`)
-                this.removeSubscription(socket.id, `project:${data.projectId}:table:${data.table}:*`)
-                socket.leave(`project:${data.projectId}:table:${data.table}`)
-                socket.leave(`project:${data.projectId}:table:${data.table}:*`)
+            socket.on('unsubscribe', (data: { projectId: string; table: string; event?: TableEventType }) => {
+                if (data.event) {
+                    const room = this.getTableRoom(data.projectId, data.table, data.event)
+                    this.removeSubscription(socket.id, room)
+                    socket.leave(room)
+                    return
+                }
+
+                for (const eventType of ['INSERT', 'UPDATE', 'DELETE', '*'] as const) {
+                    const room = this.getTableRoom(data.projectId, data.table, eventType)
+                    this.removeSubscription(socket.id, room)
+                    socket.leave(room)
+                }
             })
 
-            socket.on('presence', async (data: { projectId: string; userId: string; status: string; token?: string }) => {
+            socket.on('join_presence', async (data: { projectId: string; channel: string; token?: string }) => {
                 const payload = await this.verifyProjectToken(data.projectId, data.token)
                 if (!payload) {
                     socket.emit('error', { message: 'Invalid token' })
                     return
                 }
 
-                this.io
-                    .to(`project:${data.projectId}:presence`)
-                    .emit('presence_update', {
-                        userId: data.userId,
-                        status: data.status,
-                        timestamp: Date.now(),
-                        actor: payload.sub,
-                    })
+                const room = this.getPresenceRoom(data.projectId, data.channel)
+                socket.join(room)
+                this.recordSocketPresenceRoom(socket.id, room)
+                socket.emit('presence_state', {
+                    channel: data.channel,
+                    state: this.serializePresenceRoom(room),
+                })
+                socket.data.presenceUser = payload.sub
+            })
+
+            socket.on('leave_presence', async (data: { projectId: string; channel: string; token?: string }) => {
+                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                if (!payload) {
+                    socket.emit('error', { message: 'Invalid token' })
+                    return
+                }
+
+                const room = this.getPresenceRoom(data.projectId, data.channel)
+                this.removeSocketPresenceFromRoom(socket.id, room, data.channel)
+                socket.leave(room)
+                this.removeSocketPresenceRoom(socket.id, room)
+            })
+
+            socket.on('presence', async (data: {
+                projectId: string
+                channel: string
+                userId: string
+                status: string
+                token?: string
+            }) => {
+                const payload = await this.verifyProjectToken(data.projectId, data.token)
+                if (!payload) {
+                    socket.emit('error', { message: 'Invalid token' })
+                    return
+                }
+
+                const room = this.getPresenceRoom(data.projectId, data.channel)
+                socket.join(room)
+                this.recordSocketPresenceRoom(socket.id, room)
+
+                const nextMeta: PresenceMeta = {
+                    phx_ref: `${socket.id}:${data.channel}:${Date.now()}`,
+                    user_id: data.userId,
+                    status: data.status,
+                    timestamp: Date.now(),
+                }
+
+                const diff = this.upsertPresence(room, socket.id, data.userId, nextMeta)
+                this.io.to(room).emit('presence_diff', {
+                    channel: data.channel,
+                    ...diff,
+                })
+                socket.data.presenceUser = payload.sub
             })
 
             socket.on('broadcast', async (data: {
@@ -157,17 +223,6 @@ export class RealtimeService {
                     })
             })
 
-            socket.on('join_presence', async (data: { projectId: string; token?: string }) => {
-                const payload = await this.verifyProjectToken(data.projectId, data.token)
-                if (!payload) {
-                    socket.emit('error', { message: 'Invalid token' })
-                    return
-                }
-
-                socket.join(`project:${data.projectId}:presence`)
-                socket.data.presenceUser = payload.sub
-            })
-
             socket.on('join_broadcast', async (data: { projectId: string; channel: string; token?: string }) => {
                 const payload = await this.verifyProjectToken(data.projectId, data.token)
                 if (!payload) {
@@ -180,6 +235,7 @@ export class RealtimeService {
             })
 
             socket.on('disconnect', () => {
+                this.cleanupSocketPresence(socket.id)
                 this.subscriptions.delete(socket.id)
             })
         })
@@ -278,6 +334,114 @@ export class RealtimeService {
         }
 
         return payload.projectId === projectId ? payload : null
+    }
+
+    private upsertPresence(
+        room: string,
+        socketId: string,
+        key: string,
+        nextMeta: PresenceMeta
+    ): { joins: PresenceState; leaves: PresenceState } {
+        const roomState = this.presenceRooms.get(room) ?? new Map<string, Map<string, PresenceMeta>>()
+        const userState = roomState.get(key) ?? new Map<string, PresenceMeta>()
+        const previous = userState.get(socketId)
+
+        userState.set(socketId, nextMeta)
+        roomState.set(key, userState)
+        this.presenceRooms.set(room, roomState)
+
+        return {
+            joins: { [key]: { metas: [nextMeta] } },
+            leaves: previous ? { [key]: { metas: [previous] } } : {},
+        }
+    }
+
+    private removeSocketPresenceFromRoom(socketId: string, room: string, channel: string): void {
+        const roomState = this.presenceRooms.get(room)
+        if (!roomState) {
+            return
+        }
+
+        const leaves: PresenceState = {}
+
+        for (const [key, metas] of roomState.entries()) {
+            const previous = metas.get(socketId)
+            if (!previous) {
+                continue
+            }
+
+            metas.delete(socketId)
+            leaves[key] = { metas: [previous] }
+
+            if (metas.size === 0) {
+                roomState.delete(key)
+            }
+        }
+
+        if (roomState.size === 0) {
+            this.presenceRooms.delete(room)
+        }
+
+        if (Object.keys(leaves).length > 0) {
+            this.io.to(room).emit('presence_diff', {
+                channel,
+                joins: {},
+                leaves,
+            })
+        }
+    }
+
+    private cleanupSocketPresence(socketId: string): void {
+        const rooms = this.socketPresenceRooms.get(socketId)
+        if (!rooms) {
+            return
+        }
+
+        for (const room of rooms) {
+            const channel = room.split(':').slice(3).join(':')
+            this.removeSocketPresenceFromRoom(socketId, room, channel)
+        }
+
+        this.socketPresenceRooms.delete(socketId)
+    }
+
+    private serializePresenceRoom(room: string): PresenceState {
+        const roomState = this.presenceRooms.get(room)
+        if (!roomState) {
+            return {}
+        }
+
+        return Object.fromEntries(
+            [...roomState.entries()].map(([key, metas]) => [key, { metas: [...metas.values()] }])
+        )
+    }
+
+    private getPresenceRoom(projectId: string, channel: string): string {
+        return `project:${projectId}:presence:${channel}`
+    }
+
+    private getTableRoom(projectId: string, table: string, eventType: TableEventType): string {
+        return eventType === '*'
+            ? `project:${projectId}:table:${table}:*`
+            : `project:${projectId}:table:${table}`
+    }
+
+    private recordSocketPresenceRoom(socketId: string, room: string): void {
+        const rooms = this.socketPresenceRooms.get(socketId) ?? new Set<string>()
+        rooms.add(room)
+        this.socketPresenceRooms.set(socketId, rooms)
+    }
+
+    private removeSocketPresenceRoom(socketId: string, room: string): void {
+        const rooms = this.socketPresenceRooms.get(socketId)
+        if (!rooms) {
+            return
+        }
+
+        rooms.delete(room)
+        if (rooms.size === 0) {
+            this.socketPresenceRooms.delete(socketId)
+        }
     }
 
     private storeSubscription(socketId: string, subscription: TableSubscription): void {

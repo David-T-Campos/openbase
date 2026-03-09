@@ -58,6 +58,15 @@ export class AuthClient {
         return result
     }
 
+    /** Backwards-compatible alias for password sign-in. */
+    async signIn(credentials: {
+        email: string
+        password: string
+        mfa_code?: string
+    }): Promise<{ data: PasswordSignInResult | null; error: AuthError | null }> {
+        return this.signInWithPassword(credentials)
+    }
+
     /** Send a magic link email */
     async signInWithOtp(options: {
         email: string
