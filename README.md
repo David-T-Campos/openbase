@@ -184,12 +184,6 @@ For the dashboard, create:
 cp apps/dashboard/.env.local.example apps/dashboard/.env.local
 ```
 
-If you do not have an example file for the dashboard in your checkout, create `apps/dashboard/.env.local` manually with:
-
-```env
-NEXT_PUBLIC_API_URL=http://localhost:3001
-```
-
 ### 3. Fill in your environment values
 
 At minimum you will need:
@@ -199,6 +193,12 @@ At minimum you will need:
 - Telegram API credentials from `https://my.telegram.org`
 - a master encryption key
 - your dashboard URL
+- your public API URL
+
+Optional:
+
+- `RESEND_API_KEY` and `RESEND_FROM_EMAIL` for magic-link emails
+- Google and GitHub OAuth client credentials if you want OAuth sign-in
 
 ### 4. Install dependencies
 
@@ -248,10 +248,16 @@ The root `.env.example` currently defines the following variables.
 | `STORAGE_SECRET` | Yes | Secret used to sign storage URLs and related storage auth flows. |
 | `REDIS_URL` | Yes | Redis connection string. Use `rediss://` for remote Redis such as Upstash. |
 | `RESEND_API_KEY` | No | Resend API key for sending magic-link emails. |
+| `RESEND_FROM_EMAIL` | No | Sender email address used for magic-link emails. Required when `RESEND_API_KEY` is set. |
 | `SQLITE_BASE_PATH` | Yes | Filesystem path where SQLite index files are stored. |
 | `TELEGRAM_API_ID` | Yes | Telegram API ID from `my.telegram.org`. |
 | `TELEGRAM_API_HASH` | Yes | Telegram API hash from `my.telegram.org`. |
 | `DASHBOARD_URL` | Yes | Public dashboard URL used in redirects and magic-link flows. |
+| `API_PUBLIC_URL` | Yes in production | Public API URL used for OAuth callbacks, storage URLs, and production CORS allowlists. Defaults to `http://localhost:3001` in development only. |
+| `GOOGLE_CLIENT_ID` | No | Google OAuth client ID for project auth. |
+| `GOOGLE_CLIENT_SECRET` | No | Google OAuth client secret for project auth. |
+| `GITHUB_CLIENT_ID` | No | GitHub OAuth client ID for project auth. |
+| `GITHUB_CLIENT_SECRET` | No | GitHub OAuth client secret for project auth. |
 | `MASTER_ENCRYPTION_KEY` | Yes | 64-character hex key used to encrypt Telegram session strings and related secrets. |
 | `NEXT_PUBLIC_API_URL` | Required for dashboard | Frontend-only variable, set in `apps/dashboard/.env.local`, pointing the dashboard to the API base URL. |
 

@@ -176,33 +176,46 @@ export class AuthService {
         email: string,
         projectId: string,
         sendEmail: (to: string, subject: string, html: string) => Promise<void>,
-        dashboardUrl: string
+        dashboardUrl: string,
+        apiPublicUrl: string
     ): Promise<void> {
         const token = randomBytes(32).toString('hex')
+        const redisKey = `magic:${token}`
 
         await this.redis.setex(
-            `magic:${token}`,
+            redisKey,
             900,
             JSON.stringify({ email, projectId })
         )
 
-        const callbackUrl = `${dashboardUrl}/auth/callback?token=${token}&type=magiclink&projectId=${projectId}`
+        const callbackUrl = new URL(`/api/v1/${projectId}/auth/callback`, apiPublicUrl)
+        callbackUrl.searchParams.set('type', 'magiclink')
+        callbackUrl.searchParams.set('token', token)
+        callbackUrl.searchParams.set('redirectTo', new URL('/auth/callback', dashboardUrl).toString())
 
-        await sendEmail(
-            email,
-            'Your OpenBase magic link',
-            `
-              <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-                <h2>Sign in to OpenBase</h2>
-                <p>Click the button below to sign in. This link expires in 15 minutes.</p>
-                <a href="${callbackUrl}"
-                   style="display: inline-block; padding: 12px 24px; background: #3ecf8e;
-                          color: #08100b; text-decoration: none; border-radius: 8px;">
-                  Sign in
-                </a>
-              </div>
-            `
-        )
+        try {
+            await sendEmail(
+                email,
+                'Your OpenBase magic link',
+                `
+                  <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+                    <h2>Sign in to OpenBase</h2>
+                    <p>Click the button below to sign in. This link expires in 15 minutes.</p>
+                    <a href="${callbackUrl.toString()}"
+                       style="display: inline-block; padding: 12px 24px; background: #3ecf8e;
+                              color: #08100b; text-decoration: none; border-radius: 8px;">
+                      Sign in
+                    </a>
+                  </div>
+                `
+            )
+        } catch (error) {
+            await this.redis.del(redisKey)
+            throw new AuthError(
+                (error as Error).message || 'Magic link email delivery is not configured',
+                'MAGIC_LINK_EMAIL_NOT_CONFIGURED'
+            )
+        }
     }
 
     async verifyMagicLink(

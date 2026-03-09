@@ -1,11 +1,9 @@
-/**
- * StorageService — File upload, download, and signed URL management.
- */
-
 import jwt from 'jsonwebtoken'
-import type { StorageProvider } from '@openbase/telegram'
 import type { BucketPolicy, FileRef, TelegramChannelRef, TransformOptions, UploadOptions } from '@openbase/core'
 import { ConflictError, ForbiddenError } from '@openbase/core'
+import type { StorageProvider } from '@openbase/telegram'
+
+const STORAGE_STREAM_PART_SIZE = 64 * 1024 * 1024
 
 interface StorageManifest {
     __type: 'STORAGE_MANIFEST'
@@ -35,50 +33,96 @@ export class StorageService {
         data: Buffer,
         options: UploadOptions = {}
     ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
-        const mimeType = options.mimeType || 'application/octet-stream'
-
-        const existing = await this.findFile(
+        return this.storeUpload(
             provider,
-            storageIndexChannel,
+            projectId,
             bucketName,
             bucketChannel,
-            path
+            storageIndexChannel,
+            path,
+            options,
+            async mimeType => ({
+                fileRef: await provider.uploadFile(bucketChannel, data, path, mimeType),
+                size: data.length,
+                mimeType,
+            })
         )
+    }
 
-        if (existing && !options.upsert) {
-            throw new ConflictError(`File "${path}" already exists in bucket "${bucketName}"`)
-        }
-
-        if (existing && options.upsert) {
-            await this.deleteFile(
-                provider,
-                storageIndexChannel,
-                existing.manifestMessageId,
-                existing.fileRef
-            )
-        }
-
-        const fileRef = await provider.uploadFile(bucketChannel, data, path, mimeType)
-
-        const manifest: StorageManifest = {
-            __type: 'STORAGE_MANIFEST',
-            path,
-            bucket: bucketName,
+    async uploadStream(
+        provider: StorageProvider,
+        projectId: string,
+        bucketName: string,
+        bucketChannel: TelegramChannelRef,
+        storageIndexChannel: TelegramChannelRef,
+        path: string,
+        stream: AsyncIterable<Buffer | Uint8Array>,
+        options: UploadOptions = {}
+    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
+        return this.storeUpload(
+            provider,
+            projectId,
+            bucketName,
             bucketChannel,
-            fileRef,
-            uploadedBy: options.userId || null,
-            createdAt: Date.now(),
-            size: data.length,
-            mimeType,
-        }
-
-        await provider.sendMessage(storageIndexChannel, JSON.stringify(manifest))
-
-        return {
+            storageIndexChannel,
             path,
-            publicUrl: `${this.apiPublicUrl}/api/v1/${projectId}/storage/${bucketName}/${path.split('/').map(encodeURIComponent).join('/')}`,
-            fileRef,
-        }
+            options,
+            async mimeType => {
+                const partRefs: FileRef[] = []
+                let pending: Buffer = Buffer.alloc(0)
+                let totalSize = 0
+
+                const flushPart = async (buffer: Buffer, index: number): Promise<void> => {
+                    partRefs.push(
+                        await provider.uploadFile(
+                            bucketChannel,
+                            buffer,
+                            this.buildPartFilename(path, index),
+                            mimeType
+                        )
+                    )
+                }
+
+                for await (const rawChunk of stream) {
+                    const chunk: Buffer = Buffer.isBuffer(rawChunk)
+                        ? Buffer.from(rawChunk)
+                        : Buffer.from(rawChunk)
+                    if (chunk.length === 0) {
+                        continue
+                    }
+
+                    totalSize += chunk.length
+                    pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk])
+
+                    while (pending.length >= STORAGE_STREAM_PART_SIZE) {
+                        const part = pending.subarray(0, STORAGE_STREAM_PART_SIZE)
+                        await flushPart(Buffer.from(part), partRefs.length)
+                        pending = pending.subarray(STORAGE_STREAM_PART_SIZE)
+                    }
+                }
+
+                if (pending.length > 0 || partRefs.length === 0) {
+                    await flushPart(Buffer.from(pending), partRefs.length)
+                }
+
+                const fileRef = partRefs.length === 1
+                    ? partRefs[0]
+                    : {
+                        messageId: partRefs[0].messageId,
+                        channel: bucketChannel,
+                        filename: path,
+                        mimeType,
+                        size: totalSize,
+                        parts: partRefs,
+                    }
+
+                return {
+                    fileRef,
+                    size: totalSize,
+                    mimeType,
+                }
+            }
+        )
     }
 
     async download(
@@ -86,7 +130,9 @@ export class StorageService {
         fileRef: FileRef,
         transformOptions?: TransformOptions
     ): Promise<{ data: Buffer; mimeType: string }> {
-        let data = await provider.downloadFile(fileRef)
+        let data = fileRef.parts?.length
+            ? await this.downloadMultipartFile(provider, fileRef)
+            : await provider.downloadFile(fileRef)
         let mimeType = fileRef.mimeType
 
         if (transformOptions && this.isImage(mimeType)) {
@@ -104,7 +150,14 @@ export class StorageService {
         manifestMessageId: number,
         fileRef: FileRef
     ): Promise<void> {
-        await provider.deleteFile(fileRef)
+        if (fileRef.parts?.length) {
+            for (const part of fileRef.parts) {
+                await provider.deleteFile(part)
+            }
+        } else {
+            await provider.deleteFile(fileRef)
+        }
+
         await provider.deleteMessage(storageIndexChannel, manifestMessageId)
     }
 
@@ -172,6 +225,72 @@ export class StorageService {
         return provider.createChannel(`__storage_${name}__`)
     }
 
+    createBucketPolicy(options: { public: boolean }): BucketPolicy {
+        return {
+            public: options.public,
+            read: options.public
+                ? { public: true, roles: ['anon', 'authenticated', 'service_role', 'platform_user'] }
+                : { roles: ['authenticated', 'service_role', 'platform_user'] },
+            write: { roles: ['authenticated', 'service_role', 'platform_user'] },
+            delete: { roles: ['authenticated', 'service_role', 'platform_user'] },
+        }
+    }
+
+    private async storeUpload(
+        provider: StorageProvider,
+        projectId: string,
+        bucketName: string,
+        bucketChannel: TelegramChannelRef,
+        storageIndexChannel: TelegramChannelRef,
+        path: string,
+        options: UploadOptions,
+        uploadFile: (mimeType: string) => Promise<{ fileRef: FileRef; size: number; mimeType: string }>
+    ): Promise<{ path: string; publicUrl: string; fileRef: FileRef }> {
+        const mimeType = options.mimeType || 'application/octet-stream'
+
+        const existing = await this.findFile(
+            provider,
+            storageIndexChannel,
+            bucketName,
+            bucketChannel,
+            path
+        )
+
+        if (existing && !options.upsert) {
+            throw new ConflictError(`File "${path}" already exists in bucket "${bucketName}"`)
+        }
+
+        if (existing && options.upsert) {
+            await this.deleteFile(
+                provider,
+                storageIndexChannel,
+                existing.manifestMessageId,
+                existing.fileRef
+            )
+        }
+
+        const uploaded = await uploadFile(mimeType)
+        const manifest: StorageManifest = {
+            __type: 'STORAGE_MANIFEST',
+            path,
+            bucket: bucketName,
+            bucketChannel,
+            fileRef: uploaded.fileRef,
+            uploadedBy: options.userId || null,
+            createdAt: Date.now(),
+            size: uploaded.size,
+            mimeType: uploaded.mimeType,
+        }
+
+        await provider.sendMessage(storageIndexChannel, JSON.stringify(manifest))
+
+        return {
+            path,
+            publicUrl: `${this.apiPublicUrl}/api/v1/${projectId}/storage/${bucketName}/${path.split('/').map(encodeURIComponent).join('/')}`,
+            fileRef: uploaded.fileRef,
+        }
+    }
+
     private async getManifests(
         provider: StorageProvider,
         storageIndexChannel: TelegramChannelRef,
@@ -186,7 +305,7 @@ export class StorageService {
         fileRef: FileRef
         manifestMessageId: number
     }>> {
-        const messages = await provider.getMessages(storageIndexChannel, { limit: 500 })
+        const messages = await this.getAllMessages(provider, storageIndexChannel)
 
         return messages
             .map(message => {
@@ -217,6 +336,48 @@ export class StorageService {
                 fileRef: FileRef
                 manifestMessageId: number
             } => manifest !== null)
+    }
+
+    private async getAllMessages(
+        provider: StorageProvider,
+        channel: TelegramChannelRef
+    ): Promise<Array<{ id: number; text: string; date: number }>> {
+        const messages: Array<{ id: number; text: string; date: number }> = []
+        let offsetId: number | undefined
+
+        while (true) {
+            const page = await provider.getMessages(channel, { limit: 200, offsetId })
+            if (page.length === 0) {
+                break
+            }
+
+            messages.push(...page)
+
+            if (page.length < 200) {
+                break
+            }
+
+            offsetId = page[page.length - 1]?.id
+        }
+
+        return messages
+    }
+
+    private async downloadMultipartFile(
+        provider: StorageProvider,
+        fileRef: FileRef
+    ): Promise<Buffer> {
+        const buffers: Buffer[] = []
+
+        for (const part of fileRef.parts || []) {
+            buffers.push(await provider.downloadFile(part))
+        }
+
+        return Buffer.concat(buffers, fileRef.size)
+    }
+
+    private buildPartFilename(path: string, index: number): string {
+        return `${path}.part${String(index + 1).padStart(6, '0')}`
     }
 
     private isImage(mimeType: string): boolean {

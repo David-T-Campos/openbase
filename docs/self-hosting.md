@@ -40,6 +40,7 @@ SQLITE_BASE_PATH=./data/indexes
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=replace-with-telegram-api-hash
 DASHBOARD_URL=https://openbase.example.com
+API_PUBLIC_URL=https://api.openbase.example.com
 MASTER_ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 MOCK_TELEGRAM=false
 SKIP_WARMUP=false
@@ -47,7 +48,9 @@ SKIP_WARMUP=false
 
 Optional:
 
-- `RESEND_API_KEY` if you want email magic links
+- `RESEND_API_KEY` and `RESEND_FROM_EMAIL` if you want email magic links
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` if you want Google OAuth
+- `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` if you want GitHub OAuth
 
 For the dashboard, create `apps/dashboard/.env.local`:
 
@@ -56,6 +59,12 @@ NEXT_PUBLIC_API_URL=https://api.openbase.example.com
 ```
 
 If you are serving the dashboard and API under the same domain through a reverse proxy, set `NEXT_PUBLIC_API_URL` to the public API origin.
+
+Notes:
+
+- `API_PUBLIC_URL` defaults to `http://localhost:3001` only in development.
+- When `NODE_ENV=production`, `API_PUBLIC_URL` must be set explicitly or the API will refuse to start.
+- `DASHBOARD_URL` and `API_PUBLIC_URL` are both used in the production CORS allowlist and OAuth callback validation.
 
 ## Running with Docker Compose
 

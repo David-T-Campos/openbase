@@ -6,8 +6,9 @@
   "license": "MIT",
   "scripts": {
     "dev": "pnpm -r --parallel dev",
+    "start": "pnpm -r --parallel --filter @openbase/api --filter @openbase/dashboard start",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm --filter @openbase/core build && pnpm --filter @openbase/telegram build && pnpm -r typecheck",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "clean": "pnpm -r clean"

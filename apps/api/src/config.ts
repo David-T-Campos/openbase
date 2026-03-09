@@ -34,6 +34,7 @@ const envSchema = z.object({
 
     // Email
     RESEND_API_KEY: z.string().optional(),
+    RESEND_FROM_EMAIL: z.string().email().optional(),
 
     // SQLite
     SQLITE_BASE_PATH: z.string().default('./data/indexes'),
@@ -46,7 +47,7 @@ const envSchema = z.object({
 
     // Dashboard
     DASHBOARD_URL: z.string().url().default('http://localhost:3000'),
-    API_PUBLIC_URL: z.string().url().default('http://localhost:3001'),
+    API_PUBLIC_URL: z.string().url().optional(),
 
     // Encryption
     MASTER_ENCRYPTION_KEY: z
@@ -84,7 +85,26 @@ const envSchema = z.object({
             message: 'SKIP_WARMUP may only be enabled when NODE_ENV=development',
         })
     }
-})
+
+    if (!value.API_PUBLIC_URL && value.NODE_ENV === 'production') {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['API_PUBLIC_URL'],
+            message: 'API_PUBLIC_URL is required when NODE_ENV=production',
+        })
+    }
+
+    if (value.RESEND_API_KEY && !value.RESEND_FROM_EMAIL) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ['RESEND_FROM_EMAIL'],
+            message: 'RESEND_FROM_EMAIL is required when RESEND_API_KEY is set',
+        })
+    }
+}).transform(value => ({
+    ...value,
+    API_PUBLIC_URL: value.API_PUBLIC_URL ?? 'http://localhost:3001',
+}))
 
 export type Config = z.infer<typeof envSchema>
 

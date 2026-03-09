@@ -6,8 +6,8 @@ import { randomUUID } from 'crypto'
 import { existsSync, rmSync } from 'fs'
 import jwt from 'jsonwebtoken'
 import type Redis from 'ioredis'
-import type { Project, TableSchema, TelegramChannelRef } from '@openbase/core'
-import { ForbiddenError, NotFoundError, nowISO, sanitizeName } from '@openbase/core'
+import type { Project, TableSchema, TelegramChannelRef, TelegramMessage } from '@openbase/core'
+import { ConflictError, ForbiddenError, NotFoundError, nowISO, sanitizeName } from '@openbase/core'
 import type { StorageProvider } from '@openbase/telegram'
 import { EncryptionService } from '../encryption/EncryptionService.js'
 import { TelegramProviderFactory } from '../telegram/TelegramProviderFactory.js'
@@ -154,6 +154,10 @@ export class ProjectService {
 
     async addTable(projectId: string, tableName: string, schema: TableSchema): Promise<TelegramChannelRef> {
         return this.withProjectStorage(projectId, async (project, provider) => {
+            if (project.channelMap[tableName]) {
+                throw new ConflictError(`Table "${tableName}" already exists`)
+            }
+
             const projectSlug = sanitizeName(project.name) || 'project'
             const tableSlug = sanitizeName(tableName) || 'table'
             const channel = await provider.createChannel(`${projectSlug}_${tableSlug}`)
@@ -178,10 +182,10 @@ export class ProjectService {
 
     async getSchemas(projectId: string): Promise<Record<string, TableSchema>> {
         return this.withProjectStorage(projectId, async (project, provider) => {
-            const messages = await provider.getMessages(project.schemaChannel, { limit: 500 })
+            const messages = await this.getAllMessages(provider, project.schemaChannel)
             const schemas: Record<string, TableSchema> = {}
 
-            for (const message of messages) {
+            for (const message of [...messages].reverse()) {
                 try {
                     const data = JSON.parse(message.text) as {
                         __type?: string
@@ -276,5 +280,30 @@ export class ProjectService {
             this.jwtSecret,
             { expiresIn: '100y' }
         )
+    }
+
+    private async getAllMessages(
+        provider: StorageProvider,
+        channel: TelegramChannelRef
+    ): Promise<TelegramMessage[]> {
+        const messages: TelegramMessage[] = []
+        let offsetId: number | undefined
+
+        while (true) {
+            const page = await provider.getMessages(channel, { limit: 200, offsetId })
+            if (page.length === 0) {
+                break
+            }
+
+            messages.push(...page)
+
+            if (page.length < 200) {
+                break
+            }
+
+            offsetId = page[page.length - 1]?.id
+        }
+
+        return messages
     }
 }

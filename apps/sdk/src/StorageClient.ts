@@ -85,8 +85,9 @@ class StorageBucketClient {
             }
 
             const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
+            const encodedPath = encodeStoragePath(path)
             const response = await fetchFn(
-                `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${path}`,
+                `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${encodedPath}`,
                 {
                     method: 'POST',
                     headers: {
@@ -120,7 +121,7 @@ class StorageBucketClient {
             if (options?.transform?.format) params.set('format', options.transform.format)
 
             const query = params.toString()
-            const url = `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${path}${query ? `?${query}` : ''}`
+            const url = `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${encodeStoragePath(path)}${query ? `?${query}` : ''}`
 
             const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
             const token = this.getAccessToken() || this.apiKey
@@ -153,7 +154,7 @@ class StorageBucketClient {
             for (const path of paths) {
                 const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
                 await fetchFn(
-                    `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${path}`,
+                    `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${encodeStoragePath(path)}`,
                     {
                         method: 'DELETE',
                         headers: {
@@ -203,7 +204,7 @@ class StorageBucketClient {
     getPublicUrl(path: string): { data: { publicUrl: string } } {
         return {
             data: {
-                publicUrl: `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${path}`,
+                publicUrl: `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${encodeStoragePath(path)}`,
             },
         }
     }
@@ -238,4 +239,11 @@ class StorageBucketClient {
             return { data: null, error: { message: (error as Error).message } }
         }
     }
+}
+
+function encodeStoragePath(path: string): string {
+    return path
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/')
 }

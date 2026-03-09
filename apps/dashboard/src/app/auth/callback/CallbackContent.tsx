@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { setPlatformSession, setProjectAuthSession } from '../../../lib/platformApi'
 
 export function CallbackContent() {
     const router = useRouter()
@@ -10,33 +9,20 @@ export function CallbackContent() {
     const [message, setMessage] = useState('Signing you in...')
 
     useEffect(() => {
-        const accessToken = searchParams.get('access_token')
-        const refreshToken = searchParams.get('refresh_token')
         const token = searchParams.get('token')
         const projectId = searchParams.get('projectId')
         const type = searchParams.get('type')
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
-        if (accessToken) {
-            if (projectId) {
-                setProjectAuthSession(projectId, {
-                    access_token: accessToken,
-                    refresh_token: refreshToken || undefined,
-                })
-                router.replace(`/dashboard/${projectId}/auth`)
-                return
-            }
-
-            setPlatformSession({
-                access_token: accessToken,
-                refresh_token: refreshToken || undefined,
-            })
-            router.replace('/dashboard')
+        if (token && type === 'magiclink' && projectId) {
+            const redirectTo = `${window.location.origin}/auth/callback`
+            window.location.href = `${apiUrl}/api/v1/${projectId}/auth/callback?token=${encodeURIComponent(token)}&type=magiclink&redirectTo=${encodeURIComponent(redirectTo)}`
             return
         }
 
-        if (token && type === 'magiclink' && projectId) {
-            window.location.href = `${apiUrl}/api/v1/${projectId}/auth/callback?token=${encodeURIComponent(token)}&type=magiclink`
+        if (type === 'project_auth' && projectId) {
+            setMessage('Project authentication complete. Redirecting...')
+            router.replace(`/dashboard/${projectId}/auth`)
             return
         }
 

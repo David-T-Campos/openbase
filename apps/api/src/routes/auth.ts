@@ -1,16 +1,18 @@
-/**
- * Auth Routes — Project authentication endpoints.
- */
-
-import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { randomUUID } from 'crypto'
-import { z } from 'zod'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type Redis from 'ioredis'
 import { ForbiddenError } from '@openbase/core'
+import { z } from 'zod'
 import type { AuthService } from '../auth/AuthService.js'
 import type { IndexManager } from '../database/IndexManager.js'
 import { authMiddleware } from '../middleware/auth.js'
 import type { ProjectService } from '../projects/ProjectService.js'
+
+const ACCESS_TOKEN_COOKIE = 'openbase_access_token'
+const REFRESH_TOKEN_COOKIE = 'openbase_refresh_token'
+const ACCESS_TOKEN_TTL_SECONDS = 60 * 60
+const REFRESH_TOKEN_TTL_SECONDS = 7 * 24 * 60 * 60
+const OAUTH_STATE_TTL_SECONDS = 600
 
 const signUpSchema = z.object({
     email: z.string().email(),
@@ -29,7 +31,7 @@ const magicLinkSchema = z.object({
 })
 
 const refreshSchema = z.object({
-    refresh_token: z.string().min(1),
+    refresh_token: z.string().min(1).optional(),
 })
 
 const oauthStartSchema = z.object({
@@ -117,11 +119,14 @@ export function registerAuthRoutes(
     app.post<{ Params: { projectId: string } }>(
         '/api/v1/:projectId/auth/signout',
         async (request, reply) => {
-            const body = request.body as { refresh_token?: string }
-            if (body.refresh_token) {
-                await authService.signOut(body.refresh_token)
+            const body = refreshSchema.parse(request.body ?? {})
+            const refreshToken = body.refresh_token || getCookieValue(request, REFRESH_TOKEN_COOKIE)
+
+            if (refreshToken) {
+                await authService.signOut(refreshToken)
             }
 
+            clearProjectAuthCookies(reply, request.params.projectId, apiPublicUrl)
             return reply.send({ data: { message: 'Signed out' } })
         }
     )
@@ -132,7 +137,23 @@ export function registerAuthRoutes(
             const { projectId } = request.params
             const body = magicLinkSchema.parse(request.body)
 
-            await authService.sendMagicLink(body.email, projectId, sendEmail, dashboardUrl)
+            try {
+                await authService.sendMagicLink(
+                    body.email,
+                    projectId,
+                    sendEmail,
+                    dashboardUrl,
+                    apiPublicUrl
+                )
+            } catch (error) {
+                return reply.status(503).send({
+                    error: {
+                        message: (error as Error).message || 'Magic link email delivery is not configured',
+                        code: 'MAGIC_LINK_EMAIL_NOT_CONFIGURED',
+                    },
+                })
+            }
+
             return reply.send({ data: { message: 'Magic link sent' } })
         }
     )
@@ -140,17 +161,36 @@ export function registerAuthRoutes(
     app.post<{ Params: { projectId: string } }>(
         '/api/v1/:projectId/auth/refresh',
         async (request, reply) => {
-            const body = refreshSchema.parse(request.body)
-            const session = await authService.refreshSession(body.refresh_token)
+            const body = refreshSchema.parse(request.body ?? {})
+            const refreshToken = body.refresh_token || getCookieValue(request, REFRESH_TOKEN_COOKIE)
+
+            if (!refreshToken) {
+                return reply.status(400).send({ error: { message: 'Missing refresh token' } })
+            }
+
+            const session = await authService.refreshSession(refreshToken)
+            if (getCookieValue(request, REFRESH_TOKEN_COOKIE) || getCookieValue(request, ACCESS_TOKEN_COOKIE)) {
+                setProjectAuthCookies(reply, request.params.projectId, apiPublicUrl, session)
+            }
+
             return reply.send({ data: { session } })
         }
     )
 
-    app.get<{ Params: { projectId: string }; Querystring: { token?: string; type?: string } }>(
+    app.get<{ Params: { projectId: string }; Querystring: { token?: string; type?: string; redirectTo?: string } }>(
         '/api/v1/:projectId/auth/callback',
         async (request, reply) => {
             const { projectId } = request.params
-            const { token, type } = request.query as { token?: string; type?: string }
+            const { token, type, redirectTo } = request.query as {
+                token?: string
+                type?: string
+                redirectTo?: string
+            }
+
+            const trustedRedirect = resolveTrustedRedirect(redirectTo, dashboardUrl)
+            if (!trustedRedirect) {
+                return reply.status(400).send({ error: { message: 'Invalid redirect target' } })
+            }
 
             if (type !== 'magiclink' || !token) {
                 return reply.status(400).send({ error: { message: 'Invalid callback' } })
@@ -164,14 +204,8 @@ export function registerAuthRoutes(
                     getIndexManager(project.id)
                 )
 
-                const redirectUrl = new URL('/auth/callback', dashboardUrl)
-                redirectUrl.searchParams.set('projectId', project.id)
-                redirectUrl.searchParams.set('access_token', result.session.access_token)
-                if (result.session.refresh_token) {
-                    redirectUrl.searchParams.set('refresh_token', result.session.refresh_token)
-                }
-
-                return reply.redirect(redirectUrl.toString())
+                setProjectAuthCookies(reply, project.id, apiPublicUrl, result.session)
+                return reply.redirect(buildProjectAuthRedirect(trustedRedirect, project.id))
             })
         }
     )
@@ -209,14 +243,19 @@ export function registerAuthRoutes(
                 return reply.status(400).send({ error: { message: `${provider} OAuth is not configured` } })
             }
 
-                const state = randomUUID()
-                await redis.setex(
-                    `oauth:${state}`,
-                    600,
-                    JSON.stringify({
+            const trustedRedirect = resolveTrustedRedirect(body.redirectTo, dashboardUrl)
+            if (!trustedRedirect) {
+                return reply.status(400).send({ error: { message: 'Invalid redirect target' } })
+            }
+
+            const state = randomUUID()
+            await redis.setex(
+                `oauth:${state}`,
+                OAUTH_STATE_TTL_SECONDS,
+                JSON.stringify({
                     projectId,
                     provider,
-                    redirectTo: body.redirectTo || `${dashboardUrl}/auth/callback`,
+                    redirectTo: trustedRedirect.toString(),
                 })
             )
 
@@ -258,9 +297,18 @@ export function registerAuthRoutes(
             }
             await redis.del(`oauth:${state}`)
 
-            const savedState = JSON.parse(oauthState) as { projectId: string; provider: 'google' | 'github'; redirectTo: string }
+            const savedState = JSON.parse(oauthState) as {
+                projectId: string
+                provider: 'google' | 'github'
+                redirectTo: string
+            }
             if (savedState.projectId !== projectId || savedState.provider !== provider) {
                 return reply.status(400).send({ error: { message: 'OAuth state mismatch' } })
+            }
+
+            const trustedRedirect = resolveTrustedRedirect(savedState.redirectTo, dashboardUrl)
+            if (!trustedRedirect) {
+                return reply.status(400).send({ error: { message: 'Invalid redirect target' } })
             }
 
             const identity = await exchangeOAuthCode(
@@ -280,14 +328,8 @@ export function registerAuthRoutes(
                     identity
                 )
 
-                const redirectUrl = new URL(savedState.redirectTo)
-                redirectUrl.searchParams.set('projectId', project.id)
-                redirectUrl.searchParams.set('access_token', result.session.access_token)
-                if (result.session.refresh_token) {
-                    redirectUrl.searchParams.set('refresh_token', result.session.refresh_token)
-                }
-
-                return reply.redirect(redirectUrl.toString())
+                setProjectAuthCookies(reply, project.id, apiPublicUrl, result.session)
+                return reply.redirect(buildProjectAuthRedirect(trustedRedirect, project.id))
             })
         }
     )
@@ -479,7 +521,13 @@ async function exchangeOAuthCode(
             'User-Agent': 'OpenBase',
         },
     })
-    const userProfile = await userResponse.json() as { id: number; login: string; name?: string; avatar_url?: string; email?: string | null }
+    const userProfile = await userResponse.json() as {
+        id: number
+        login: string
+        name?: string
+        avatar_url?: string
+        email?: string | null
+    }
     let email = userProfile.email || ''
 
     if (!email) {
@@ -502,4 +550,137 @@ async function exchangeOAuthCode(
             avatar_url: userProfile.avatar_url,
         },
     }
+}
+
+function resolveTrustedRedirect(redirectTo: string | undefined, dashboardUrl: string): URL | null {
+    const trustedOrigin = new URL(dashboardUrl).origin
+    const fallback = new URL('/auth/callback', dashboardUrl)
+
+    if (!redirectTo) {
+        return fallback
+    }
+
+    try {
+        const candidate = new URL(redirectTo)
+        if (candidate.origin !== trustedOrigin) {
+            return null
+        }
+
+        return candidate
+    } catch {
+        return null
+    }
+}
+
+function buildProjectAuthRedirect(redirectTo: URL, projectId: string): string {
+    const redirect = new URL(redirectTo.toString())
+    redirect.searchParams.delete('access_token')
+    redirect.searchParams.delete('refresh_token')
+    redirect.searchParams.set('projectId', projectId)
+    redirect.searchParams.set('type', 'project_auth')
+    return redirect.toString()
+}
+
+function setProjectAuthCookies(
+    reply: FastifyReply,
+    projectId: string,
+    apiPublicUrl: string,
+    session: { access_token: string; refresh_token?: string }
+): void {
+    const secure = new URL(apiPublicUrl).protocol === 'https:'
+    const path = `/api/v1/${projectId}/`
+    const cookies = [
+        serializeCookie(ACCESS_TOKEN_COOKIE, session.access_token, {
+            httpOnly: true,
+            maxAge: ACCESS_TOKEN_TTL_SECONDS,
+            path,
+            sameSite: 'Lax',
+            secure,
+        }),
+    ]
+
+    if (session.refresh_token) {
+        cookies.push(
+            serializeCookie(REFRESH_TOKEN_COOKIE, session.refresh_token, {
+                httpOnly: true,
+                maxAge: REFRESH_TOKEN_TTL_SECONDS,
+                path,
+                sameSite: 'Lax',
+                secure,
+            })
+        )
+    }
+
+    reply.header('Set-Cookie', cookies)
+}
+
+function clearProjectAuthCookies(
+    reply: FastifyReply,
+    projectId: string,
+    apiPublicUrl: string
+): void {
+    const secure = new URL(apiPublicUrl).protocol === 'https:'
+    const path = `/api/v1/${projectId}/`
+
+    reply.header('Set-Cookie', [
+        serializeCookie(ACCESS_TOKEN_COOKIE, '', {
+            httpOnly: true,
+            maxAge: 0,
+            path,
+            sameSite: 'Lax',
+            secure,
+        }),
+        serializeCookie(REFRESH_TOKEN_COOKIE, '', {
+            httpOnly: true,
+            maxAge: 0,
+            path,
+            sameSite: 'Lax',
+            secure,
+        }),
+    ])
+}
+
+function serializeCookie(
+    name: string,
+    value: string,
+    options: {
+        httpOnly?: boolean
+        maxAge: number
+        path: string
+        sameSite: 'Lax' | 'Strict' | 'None'
+        secure: boolean
+    }
+): string {
+    const parts = [
+        `${name}=${encodeURIComponent(value)}`,
+        `Path=${options.path}`,
+        `Max-Age=${options.maxAge}`,
+        `SameSite=${options.sameSite}`,
+    ]
+
+    if (options.httpOnly) {
+        parts.push('HttpOnly')
+    }
+
+    if (options.secure) {
+        parts.push('Secure')
+    }
+
+    return parts.join('; ')
+}
+
+function getCookieValue(request: FastifyRequest, name: string): string | undefined {
+    const header = request.headers.cookie
+    if (!header) {
+        return undefined
+    }
+
+    for (const part of header.split(';')) {
+        const [rawKey, ...rawValue] = part.trim().split('=')
+        if (rawKey === name) {
+            return decodeURIComponent(rawValue.join('='))
+        }
+    }
+
+    return undefined
 }

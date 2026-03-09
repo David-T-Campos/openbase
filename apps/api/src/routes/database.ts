@@ -64,11 +64,30 @@ export function registerDatabaseRoutes(
         async (request, reply) => {
             const project = await assertProjectAdminAccess(projectService, request)
             const body = createTableSchema.parse(request.body)
+            const encryptedColumns = new Set(
+                body.columns.filter(column => column.encrypted).map(column => column.name)
+            )
+            const invalidIndexedColumns = body.indexes.filter(index => encryptedColumns.has(index))
+
+            if (project.channelMap[body.tableName]) {
+                return reply.status(409).send({
+                    error: { message: `Table "${body.tableName}" already exists`, code: 'CONFLICT' },
+                })
+            }
+
+            if (invalidIndexedColumns.length > 0) {
+                return reply.status(400).send({
+                    error: {
+                        message: `Encrypted columns cannot be indexed: ${invalidIndexedColumns.join(', ')}`,
+                        code: 'INVALID_INDEX_CONFIGURATION',
+                    },
+                })
+            }
 
             const schema: TableSchema = {
                 tableName: body.tableName,
                 columns: body.columns as ColumnDefinition[],
-                indexes: Array.from(new Set(['id', ...body.indexes])),
+                indexes: Array.from(new Set(['id', ...body.indexes])).filter(index => !encryptedColumns.has(index)),
                 rls: body.rls,
             }
 
@@ -315,11 +334,15 @@ function buildQueryEngine(
     const encryptedColumns = new Set(
         schema.columns.filter(column => column.encrypted).map(column => column.name)
     )
+    const indexableSchema: TableSchema = {
+        ...schema,
+        indexes: schema.indexes.filter(column => !encryptedColumns.has(column)),
+    }
 
     return new QueryEngine(
         provider,
         indexManager,
-        schema,
+        indexableSchema,
         {
             encodeValue: (columnName, value) => {
                 if (!encryptedColumns.has(columnName) || value === null || value === undefined) {

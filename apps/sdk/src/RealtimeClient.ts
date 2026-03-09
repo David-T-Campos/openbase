@@ -208,6 +208,7 @@ export class RealtimeClient {
             channel,
             event,
             payload,
+            token: this.getAccessToken() || this.getApiKey(),
         })
     }
 
@@ -217,6 +218,7 @@ export class RealtimeClient {
             projectId: this.projectId,
             userId,
             status,
+            token: this.getAccessToken() || this.getApiKey(),
         })
     }
 

@@ -109,7 +109,7 @@ export default function StorageBrowserPage() {
         formData.append('file', file)
 
         try {
-            await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${file.name}`, {
+            await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${encodeStoragePath(file.name)}`, {
                 method: 'POST',
                 body: formData,
             })
@@ -127,7 +127,7 @@ export default function StorageBrowserPage() {
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
         try {
-            await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${path}`, {
+            await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${encodeStoragePath(path)}`, {
                 method: 'DELETE',
             })
             await fetchFiles(activeBucket)
@@ -142,7 +142,7 @@ export default function StorageBrowserPage() {
         const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001'
 
         try {
-            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${path}`)
+            const res = await authenticatedFetch(`${apiUrl}/api/v1/${projectId}/storage/${activeBucket}/${encodeStoragePath(path)}`)
             if (!res.ok) {
                 throw new Error(`Failed to download ${path}`)
             }
@@ -394,4 +394,11 @@ export default function StorageBrowserPage() {
             </section>
         </div>
     )
+}
+
+function encodeStoragePath(path: string): string {
+    return path
+        .split('/')
+        .map(segment => encodeURIComponent(segment))
+        .join('/')
 }

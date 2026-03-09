@@ -1,28 +1,24 @@
-/**
- * JWT Authentication Middleware
- *
- * Extracts and verifies the Bearer token from the Authorization header.
- * Attaches the decoded JWT payload to request.user.
- */
-
-import type { FastifyRequest, FastifyReply } from 'fastify'
-import jwt from 'jsonwebtoken'
+import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { JWTPayload } from '@openbase/core'
+import jwt from 'jsonwebtoken'
 
-// Extend FastifyRequest to include user
 declare module 'fastify' {
     interface FastifyRequest {
         user?: JWTPayload
     }
 }
 
-/**
- * Extract the bearer token or apikey value from a request.
- */
+const ACCESS_TOKEN_COOKIE = 'openbase_access_token'
+
 export function getRequestToken(request: FastifyRequest): string | null {
     const authHeader = request.headers.authorization
     if (authHeader?.startsWith('Bearer ')) {
         return authHeader.slice(7)
+    }
+
+    const cookieToken = getCookieValue(request, ACCESS_TOKEN_COOKIE)
+    if (cookieToken) {
+        return cookieToken
     }
 
     const apiKey = request.headers.apikey
@@ -33,10 +29,6 @@ export function getRequestToken(request: FastifyRequest): string | null {
     return null
 }
 
-/**
- * Auth middleware — verifies JWT and attaches user to request.
- * For use with fastify preHandler hooks.
- */
 export async function authMiddleware(
     request: FastifyRequest,
     reply: FastifyReply
@@ -49,39 +41,39 @@ export async function authMiddleware(
         })
     }
 
-    try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload
-        request.user = payload
-    } catch {
+    const payload = verifyRequestToken(token)
+    if (!payload) {
         return reply.status(401).send({
             error: { message: 'Invalid or expired token', code: 'INVALID_TOKEN' },
         })
     }
+
+    if (payload.type === 'refresh') {
+        return reply.status(401).send({
+            error: { message: 'Refresh tokens cannot be used as bearer tokens', code: 'INVALID_TOKEN_TYPE' },
+        })
+    }
+
+    request.user = payload
 }
 
-/**
- * Optional auth middleware — does NOT reject unauthenticated requests.
- * Attaches user if token is present and valid, otherwise user is undefined.
- */
 export async function optionalAuthMiddleware(
     request: FastifyRequest,
     _reply: FastifyReply
 ): Promise<void> {
     const token = getRequestToken(request)
-    if (!token) return
-
-    try {
-        const payload = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload
-        request.user = payload
-    } catch {
-        // Silently ignore invalid tokens in optional mode
+    if (!token) {
+        return
     }
+
+    const payload = verifyRequestToken(token)
+    if (!payload || payload.type === 'refresh') {
+        return
+    }
+
+    request.user = payload
 }
 
-/**
- * Service role middleware — checks if the token has service_role.
- * Must be used AFTER authMiddleware.
- */
 export async function serviceRoleMiddleware(
     request: FastifyRequest,
     reply: FastifyReply
@@ -99,19 +91,44 @@ export async function serviceRoleMiddleware(
     }
 }
 
-/**
- * Platform auth middleware — only allows dashboard/platform users.
- */
 export async function platformAuthMiddleware(
     request: FastifyRequest,
     reply: FastifyReply
 ): Promise<void> {
     await authMiddleware(request, reply)
-    if (reply.sent) return
+    if (reply.sent) {
+        return
+    }
 
     if (request.user?.role !== 'platform_user' || !request.user.sub) {
         return reply.status(403).send({
             error: { message: 'Platform user token required', code: 'FORBIDDEN' },
         })
     }
+}
+
+function verifyRequestToken(token: string): JWTPayload | null {
+    try {
+        return jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload
+    } catch {
+        return null
+    }
+}
+
+function getCookieValue(request: FastifyRequest, name: string): string | null {
+    const header = request.headers.cookie
+    if (!header) {
+        return null
+    }
+
+    for (const part of header.split(';')) {
+        const [rawKey, ...rawValue] = part.trim().split('=')
+        if (rawKey !== name) {
+            continue
+        }
+
+        return decodeURIComponent(rawValue.join('='))
+    }
+
+    return null
 }

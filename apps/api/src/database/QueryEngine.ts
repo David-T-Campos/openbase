@@ -16,12 +16,18 @@ interface QueryEngineOptions {
 type QueryRow = Record<string, unknown> & { _msgId: number }
 
 export class QueryEngine {
+    private readonly encryptedColumns: Set<string>
+
     constructor(
         private readonly storageProvider: StorageProvider,
         private readonly indexManager: IndexManager,
         private readonly schema: TableSchema,
         private readonly options: QueryEngineOptions = {}
-    ) { }
+    ) {
+        this.encryptedColumns = new Set(
+            this.schema.columns.filter(column => column.encrypted).map(column => column.name)
+        )
+    }
 
     async select(
         tableName: string,
@@ -29,7 +35,9 @@ export class QueryEngine {
         options: QueryOptions = {}
     ): Promise<Record<string, unknown>[]> {
         const indexedFilter = options.filters?.find(
-            filter => filter.operator === 'eq' && this.schema.indexes.includes(filter.column)
+            filter => filter.operator === 'eq'
+                && this.schema.indexes.includes(filter.column)
+                && !this.encryptedColumns.has(filter.column)
         )
 
         let messages: TelegramMessage[] = []
@@ -275,6 +283,7 @@ export class QueryEngine {
         row: Record<string, unknown>
     ): Promise<void> {
         const indexEntries = this.schema.indexes
+            .filter(column => !this.encryptedColumns.has(column))
             .filter(column => row[column] !== undefined && row[column] !== null)
             .map(column => ({
                 columnName: column,

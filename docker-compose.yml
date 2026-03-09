@@ -27,6 +27,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       SQLITE_BASE_PATH: ${SQLITE_BASE_PATH:-./data/indexes}
       DASHBOARD_URL: ${DASHBOARD_URL:-http://localhost:3000}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://localhost:3001}
       MOCK_TELEGRAM: ${MOCK_TELEGRAM:-false}
       SKIP_WARMUP: ${SKIP_WARMUP:-false}
     command:

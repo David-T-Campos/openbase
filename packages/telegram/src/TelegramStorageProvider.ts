@@ -137,6 +137,9 @@ export class TelegramStorageProvider implements EventedStorageProvider {
     async editMessage(channel: ChannelInput, messageId: number, content: string): Promise<void> {
         return this.rateLimitedCall(async () => {
             const entity = await this.resolveChannel(channel)
+            const existingMessage = await this.fetchMessageById(entity, messageId)
+            const existingText = existingMessage?.text || ''
+            await this.deleteChainParts(entity, messageId, existingText)
 
             if (content.length <= MAX_MESSAGE_LENGTH) {
                 await this.client.editMessage(entity, {
@@ -146,19 +149,18 @@ export class TelegramStorageProvider implements EventedStorageProvider {
                 return
             }
 
-            await this.deleteChainParts(entity, messageId)
+            const chainId = generateId()
+            const parts = this.splitContent(content)
+            const header = JSON.stringify({ total: parts.length, chainId })
             await this.client.editMessage(entity, {
                 message: messageId,
-                text: content.slice(0, MAX_MESSAGE_LENGTH),
+                text: `${CHAIN_START}${header}\n${parts[0]}`,
             })
 
-            const remaining = content.slice(MAX_MESSAGE_LENGTH)
-            const chainId = generateId()
-            const parts = this.splitContent(remaining)
-            for (let index = 0; index < parts.length; index++) {
-                const header = JSON.stringify({ chainId, index: index + 1, parentId: messageId })
+            for (let index = 1; index < parts.length; index++) {
+                const partHeader = JSON.stringify({ chainId, index, parentId: messageId })
                 await this.client.sendMessage(entity, {
-                    message: `${CHAIN_PART}${header}\n${parts[index]}`,
+                    message: `${CHAIN_PART}${partHeader}\n${parts[index]}`,
                 })
                 await sleep(200 + Math.random() * 200)
             }
@@ -169,6 +171,8 @@ export class TelegramStorageProvider implements EventedStorageProvider {
     async deleteMessage(channel: ChannelInput, messageId: number): Promise<void> {
         return this.rateLimitedCall(async () => {
             const entity = await this.resolveChannel(channel)
+            const existingMessage = await this.fetchMessageById(entity, messageId)
+            await this.deleteChainParts(entity, messageId, existingMessage?.text || '')
             await this.client.deleteMessages(entity, [messageId], { revoke: true })
         })
     }
@@ -177,17 +181,15 @@ export class TelegramStorageProvider implements EventedStorageProvider {
     async getMessage(channel: ChannelInput, messageId: number): Promise<string | null> {
         return this.rateLimitedCall(async () => {
             const entity = await this.resolveChannel(channel)
-            const messages = await this.client.getMessages(entity, { ids: [messageId] })
-
-            if (!messages || messages.length === 0 || !messages[0]) {
+            const message = await this.fetchMessageById(entity, messageId)
+            if (!message) {
                 return null
             }
 
-            const message = messages[0]
             const text = message.text || ''
 
             if (text.startsWith(CHAIN_START)) {
-                return this.reconstructChainedMessage(entity, text)
+                return this.reconstructChainedMessage(entity, message.id, text)
             }
 
             return text
@@ -205,13 +207,25 @@ export class TelegramStorageProvider implements EventedStorageProvider {
                 maxId: options.maxId,
             })
 
-            return messages
-                .filter(message => message && message.text && !message.text.startsWith(CHAIN_PART))
-                .map(message => ({
-                    id: message.id,
-                    text: message.text || '',
-                    date: this.toTimestamp(message.date),
-                }))
+            const reconstructed = await Promise.all(
+                messages.map(async message => {
+                    if (!message || !message.text || message.text.startsWith(CHAIN_PART)) {
+                        return null
+                    }
+
+                    const text = message.text.startsWith(CHAIN_START)
+                        ? await this.reconstructChainedMessage(entity, message.id, message.text)
+                        : message.text
+
+                    return {
+                        id: message.id,
+                        text,
+                        date: this.toTimestamp(message.date),
+                    }
+                })
+            )
+
+            return reconstructed.filter((message): message is TelegramMessage => message !== null)
         })
     }
 
@@ -488,7 +502,7 @@ export class TelegramStorageProvider implements EventedStorageProvider {
         })
 
         for (let index = 1; index < parts.length; index++) {
-            const partHeader = JSON.stringify({ chainId, index })
+            const partHeader = JSON.stringify({ chainId, index, parentId: firstResult.id })
             await this.client.sendMessage(entity, {
                 message: `${CHAIN_PART}${partHeader}\n${parts[index]}`,
             })
@@ -499,56 +513,147 @@ export class TelegramStorageProvider implements EventedStorageProvider {
     }
 
     /** Reconstruct a chained message from its parts */
-    private async reconstructChainedMessage(entity: Api.InputChannel, firstText: string): Promise<string> {
-        const headerEnd = firstText.indexOf('\n')
-        const headerJson = firstText.slice(CHAIN_START.length, headerEnd)
-        const header = JSON.parse(headerJson) as { total: number; chainId: string }
-        const firstPart = firstText.slice(headerEnd + 1)
-
-        if (header.total === 1) return firstPart
-
-        const recentMessages = await this.client.getMessages(entity, { limit: header.total * 2 })
-        const parts: string[] = [firstPart]
-
-        for (const message of recentMessages) {
-            if (message.text?.startsWith(CHAIN_PART)) {
-                const partHeaderEnd = message.text.indexOf('\n')
-                const partHeader = JSON.parse(message.text.slice(CHAIN_PART.length, partHeaderEnd)) as {
-                    chainId: string
-                    index: number
-                }
-                if (partHeader.chainId === header.chainId) {
-                    parts[partHeader.index] = message.text.slice(partHeaderEnd + 1)
-                }
-            }
+    private async reconstructChainedMessage(entity: Api.InputChannel, parentMessageId: number, firstText: string): Promise<string> {
+        const header = this.parseChainStart(firstText)
+        if (!header) {
+            return firstText
         }
 
-        return parts.join('')
+        const parts: string[] = new Array(header.total)
+        parts[0] = header.content
+
+        if (header.total === 1) {
+            return header.content
+        }
+
+        let collected = 1
+        let offsetId: number | undefined
+
+        while (collected < header.total) {
+            const page = await this.client.getMessages(entity, {
+                limit: 200,
+                offsetId,
+                minId: parentMessageId,
+            })
+
+            if (!page.length) {
+                break
+            }
+
+            for (const message of page) {
+                const part = this.parseChainPart(message.text || '')
+                if (!part) {
+                    continue
+                }
+
+                const parentMatches = part.parentId === undefined || part.parentId === parentMessageId
+                if (part.chainId !== header.chainId || !parentMatches) {
+                    continue
+                }
+
+                if (parts[part.index] === undefined) {
+                    parts[part.index] = part.content
+                    collected += 1
+                }
+            }
+
+            if (page.length < 200) {
+                break
+            }
+
+            offsetId = page[page.length - 1]?.id
+        }
+
+        return parts.filter(part => part !== undefined).join('')
     }
 
     /** Delete chain parts associated with a parent message */
-    private async deleteChainParts(entity: Api.InputChannel, parentMessageId: number): Promise<void> {
-        const recentMessages = await this.client.getMessages(entity, { limit: 50 })
+    private async deleteChainParts(entity: Api.InputChannel, parentMessageId: number, firstText = ''): Promise<void> {
+        const chainStart = this.parseChainStart(firstText)
         const idsToDelete: number[] = []
+        let offsetId: number | undefined
 
-        for (const message of recentMessages) {
-            if (message.text?.startsWith(CHAIN_PART)) {
-                try {
-                    const headerEnd = message.text.indexOf('\n')
-                    const partHeader = JSON.parse(message.text.slice(CHAIN_PART.length, headerEnd)) as {
-                        parentId?: number
-                    }
-                    if (partHeader.parentId === parentMessageId) {
-                        idsToDelete.push(message.id)
-                    }
-                } catch {
-                    // Ignore malformed chain parts.
+        while (true) {
+            const page = await this.client.getMessages(entity, {
+                limit: 200,
+                offsetId,
+                minId: parentMessageId,
+            })
+
+            if (!page.length) {
+                break
+            }
+
+            for (const message of page) {
+                const part = this.parseChainPart(message.text || '')
+                if (!part) {
+                    continue
+                }
+
+                const parentMatches = part.parentId === parentMessageId
+                const chainMatches = chainStart?.chainId && part.chainId === chainStart.chainId
+                if (parentMatches || chainMatches) {
+                    idsToDelete.push(message.id)
                 }
             }
+
+            if (page.length < 200) {
+                break
+            }
+
+            offsetId = page[page.length - 1]?.id
         }
 
         if (idsToDelete.length > 0) {
             await this.client.deleteMessages(entity, idsToDelete, { revoke: true })
+        }
+    }
+
+    private async fetchMessageById(entity: Api.InputChannel, messageId: number): Promise<Api.Message | null> {
+        const messages = await this.client.getMessages(entity, { ids: [messageId] })
+        if (!messages || messages.length === 0 || !messages[0]) {
+            return null
+        }
+
+        return messages[0]
+    }
+
+    private parseChainStart(text: string): { total: number; chainId: string; content: string } | null {
+        if (!text.startsWith(CHAIN_START)) {
+            return null
+        }
+
+        try {
+            const headerEnd = text.indexOf('\n')
+            const headerJson = text.slice(CHAIN_START.length, headerEnd)
+            const header = JSON.parse(headerJson) as { total: number; chainId: string }
+            return {
+                total: header.total,
+                chainId: header.chainId,
+                content: text.slice(headerEnd + 1),
+            }
+        } catch {
+            return null
+        }
+    }
+
+    private parseChainPart(text: string): { chainId: string; index: number; parentId?: number; content: string } | null {
+        if (!text.startsWith(CHAIN_PART)) {
+            return null
+        }
+
+        try {
+            const headerEnd = text.indexOf('\n')
+            const headerJson = text.slice(CHAIN_PART.length, headerEnd)
+            const header = JSON.parse(headerJson) as { chainId: string; index: number; parentId?: number }
+            return {
+                chainId: header.chainId,
+                index: header.index,
+                parentId: header.parentId,
+                content: text.slice(headerEnd + 1),
+            }
+        } catch {
+            return null
         }
     }
 

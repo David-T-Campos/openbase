@@ -33,6 +33,7 @@ export interface FileRef {
     mimeType: string
     size: number
     chunks?: number[]
+    parts?: FileRef[]
 }
 
 // ─── Schema Types ────────────────────────────────────────────
@@ -201,10 +202,19 @@ export interface TransformOptions {
 }
 
 /** Bucket policy */
+export interface BucketPermission {
+    public?: boolean
+    roles?: string[]
+    userIds?: string[]
+}
+
 export interface BucketPolicy {
     public: boolean
     allowedMimeTypes?: string[]
     maxFileSize?: number
+    read?: BucketPermission
+    write?: BucketPermission
+    delete?: BucketPermission
 }
 
 // ─── Realtime Types ──────────────────────────────────────────

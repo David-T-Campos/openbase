@@ -5,12 +5,12 @@ import helmet from '@fastify/helmet'
 import multipart from '@fastify/multipart'
 import Fastify from 'fastify'
 import Redis from 'ioredis'
-import { loadConfig } from './config.js'
 import { AuthService } from './auth/index.js'
-import { createRateLimiter } from './middleware/index.js'
-import { EncryptionService } from './encryption/index.js'
+import { loadConfig } from './config.js'
 import { IndexManager } from './database/index.js'
+import { EncryptionService } from './encryption/index.js'
 import { RequestLogService } from './logs/index.js'
+import { createRateLimiter } from './middleware/index.js'
 import { ProjectService } from './projects/index.js'
 import { RealtimeService } from './realtime/RealtimeService.js'
 import { TelegramRealtimeBridge } from './realtime/index.js'
@@ -34,6 +34,7 @@ declare module 'fastify' {
 
 async function bootstrap(): Promise<void> {
     const config = loadConfig()
+    const allowedOrigins = buildAllowedOrigins(config.DASHBOARD_URL, config.API_PUBLIC_URL)
 
     const app = Fastify({
         logger: {
@@ -45,14 +46,19 @@ async function bootstrap(): Promise<void> {
     })
 
     await app.register(cors, {
-        origin: config.NODE_ENV === 'production' ? false : true,
+        origin: (origin, callback) => {
+            if (!origin || allowedOrigins.has(origin)) {
+                callback(null, true)
+                return
+            }
+
+            callback(null, false)
+        },
         credentials: true,
     })
 
     await app.register(helmet, { crossOriginResourcePolicy: false })
-    await app.register(multipart, {
-        limits: { fileSize: 50 * 1024 * 1024 },
-    })
+    await app.register(multipart)
 
     const redis = new Redis(config.REDIS_URL, {
         maxRetriesPerRequest: null,
@@ -144,7 +150,9 @@ async function bootstrap(): Promise<void> {
         })
     })
 
-    const realtimeService = new RealtimeService(app.server, config.JWT_SECRET)
+    const realtimeService = new RealtimeService(app.server, config.JWT_SECRET, projectService, {
+        allowedOrigins,
+    })
 
     app.addHook('onResponse', async request => {
         const projectId = typeof (request.params as { projectId?: string } | undefined)?.projectId === 'string'
@@ -168,15 +176,14 @@ async function bootstrap(): Promise<void> {
     })
 
     const sendEmail = async (to: string, subject: string, html: string): Promise<void> => {
-        if (!config.RESEND_API_KEY) {
-            app.log.warn('RESEND_API_KEY not set — skipping email')
-            return
+        if (!config.RESEND_API_KEY || !config.RESEND_FROM_EMAIL) {
+            throw new Error('Magic link email delivery is not configured. Set RESEND_API_KEY and RESEND_FROM_EMAIL.')
         }
 
         const { Resend } = await import('resend')
         const resend = new Resend(config.RESEND_API_KEY)
         await resend.emails.send({
-            from: 'OpenBase <noreply@openbase.dev>',
+            from: config.RESEND_FROM_EMAIL,
             to,
             subject,
             html,
@@ -237,6 +244,14 @@ async function bootstrap(): Promise<void> {
 
     await app.listen({ port: config.PORT, host: '0.0.0.0' })
     app.log.info(`OpenBase API running on port ${config.PORT}`)
+}
+
+function buildAllowedOrigins(...urls: string[]): Set<string> {
+    return new Set(
+        urls
+            .map(value => new URL(value).origin)
+            .filter(Boolean)
+    )
 }
 
 bootstrap().catch(error => {
