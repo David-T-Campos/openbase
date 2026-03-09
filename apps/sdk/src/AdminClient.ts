@@ -1,7 +1,11 @@
 import {
     authUserSchema,
+    functionDefinitionSchema,
+    functionInvocationResultSchema,
+    functionLogEntrySchema,
     migrationDefinitionSchema,
     migrationHistoryEntrySchema,
+    oqlQueryResultSchema,
     projectInvitationSchema,
     projectMemberSchema,
     projectRoleDefinitionSchema,
@@ -135,6 +139,47 @@ export class OpenBaseAdminClient {
                 projectInvitationSchema
             ),
         },
+        functions: {
+            list: async () => this.request('GET', '/functions', z.array(functionDefinitionSchema)),
+            get: async (name: string) => this.request('GET', `/functions/${encodeURIComponent(name)}/details`, functionDefinitionSchema),
+            save: async (payload: {
+                name: string
+                description?: string
+                runtime?: 'javascript' | 'typescript'
+                source: string
+                timeoutMs?: number
+                rpc?: { enabled?: boolean; access?: 'public' | 'authenticated' | 'service_role' }
+                webhook?: { enabled?: boolean; secret?: string | null; method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' }
+                schedule?: { enabled?: boolean; cron?: string | null }
+            }) => this.request(
+                'POST',
+                '/functions',
+                functionDefinitionSchema,
+                z.object({
+                    name: z.string().min(1),
+                    description: z.string().optional(),
+                    runtime: z.enum(['javascript', 'typescript']).optional(),
+                    source: z.string().min(1),
+                    timeoutMs: z.number().int().min(500).max(60000).optional(),
+                    rpc: z.object({
+                        enabled: z.boolean().optional(),
+                        access: z.enum(['public', 'authenticated', 'service_role']).optional(),
+                    }).optional(),
+                    webhook: z.object({
+                        enabled: z.boolean().optional(),
+                        secret: z.string().nullable().optional(),
+                        method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']).optional(),
+                    }).optional(),
+                    schedule: z.object({
+                        enabled: z.boolean().optional(),
+                        cron: z.string().nullable().optional(),
+                    }).optional(),
+                }).parse(payload)
+            ),
+            deploy: async (name: string) => this.request('POST', `/functions/${encodeURIComponent(name)}/deploy`, functionDefinitionSchema),
+            logs: async (name: string) => this.request('GET', `/functions/${encodeURIComponent(name)}/logs`, z.array(functionLogEntrySchema)),
+            delete: async (name: string) => this.request('DELETE', `/functions/${encodeURIComponent(name)}`, messageSchema),
+        },
     }
 
     constructor(projectUrl: string, serviceRoleKey: string) {
@@ -168,6 +213,24 @@ export class OpenBaseAdminClient {
 
     channel(name: string): RealtimeChannel {
         return this.realtime.channel(name)
+    }
+
+    async oql(query: string): Promise<{ data: z.infer<typeof oqlQueryResultSchema> | null; error: { message: string } | null }> {
+        return this.request(
+            'POST',
+            '/oql',
+            oqlQueryResultSchema,
+            z.object({ query: z.string().min(1) }).parse({ query })
+        )
+    }
+
+    async rpc(name: string, params?: Record<string, unknown>): Promise<{ data: z.infer<typeof functionInvocationResultSchema> | null; error: { message: string } | null }> {
+        return this.request(
+            'POST',
+            `/functions/${encodeURIComponent(name)}`,
+            functionInvocationResultSchema,
+            z.object({ params: z.record(z.unknown()).optional() }).parse({ params })
+        )
     }
 
     private async request<TSchema extends z.ZodTypeAny>(

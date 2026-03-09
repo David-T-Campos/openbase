@@ -9,11 +9,13 @@ import type { Config } from './config.js'
 import { loadConfig } from './config.js'
 import { IndexManager } from './database/index.js'
 import { EncryptionService } from './encryption/index.js'
+import { FunctionService } from './functions/index.js'
 import { buildErrorEnvelope, validateOutputEnvelope } from './http/response.js'
 import { RequestLogService } from './logs/index.js'
 import { createRateLimiter } from './middleware/index.js'
 import { MigrationService } from './migrations/index.js'
 import { BackupService, OperationsLogService, SystemHealthService } from './ops/index.js'
+import { OqlService } from './oql/index.js'
 import { PlatformUserRepository } from './platform/index.js'
 import { ProjectService } from './projects/index.js'
 import { RealtimeService } from './realtime/RealtimeService.js'
@@ -21,8 +23,10 @@ import { TelegramRealtimeBridge } from './realtime/index.js'
 import {
     registerAuthRoutes,
     registerDatabaseRoutes,
+    registerFunctionRoutes,
     registerMigrationRoutes,
     registerOpsRoutes,
+    registerOqlRoutes,
     registerPlatformRoutes,
     registerProjectRoutes,
     registerStorageRoutes,
@@ -58,6 +62,7 @@ export interface AppContext {
     backupService: BackupService
     systemHealthService: SystemHealthService
     webhookService: WebhookService
+    functionService: FunctionService
     sessionPool: TelegramSessionPool
     realtimeBridge: TelegramRealtimeBridge
     warmupService: WarmupService
@@ -236,6 +241,12 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         encryptionService,
         masterKey,
     })
+    const oqlService = new OqlService(
+        projectService,
+        getIndexManager,
+        encryptionService,
+        masterKey
+    )
     const backupService = new BackupService(
         redis,
         projectService,
@@ -290,6 +301,16 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
     const realtimeService = new RealtimeService(app.server, config.JWT_SECRET, projectService, projectAccessService, authService, {
         allowedOrigins,
     })
+    const functionService = new FunctionService(
+        redis,
+        projectService,
+        projectAccessService,
+        operationsLogService,
+        {
+            runtimeBaseUrl: config.API_PUBLIC_URL,
+            enableScheduler: config.NODE_ENV !== 'test',
+        }
+    )
     const transactionService = new TransactionService(redis, projectService, {
         getIndexManager,
         encryptionService,
@@ -339,6 +360,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
     await realtimeBridge.start()
 
     registerDatabaseRoutes(app, projectService, projectAccessService, authService, getIndexManager, encryptionService, masterKey, realtimeService, webhookService)
+    registerOqlRoutes(app, projectService, projectAccessService, authService, oqlService)
     registerMigrationRoutes(app, projectService, projectAccessService, authService, migrationService)
     registerAuthRoutes(
         app,
@@ -364,6 +386,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
             },
         }
     )
+    registerFunctionRoutes(app, projectService, projectAccessService, authService, functionService)
     registerStorageRoutes(app, storageService, uploadSessionService, projectService, projectAccessService, authService)
     registerTransactionRoutes(app, projectService, projectAccessService, authService, transactionService)
     registerProjectRoutes(app, projectService, projectAccessService, warmupService, requestLogService, webhookService, operationsLogService, sessionPool)
@@ -383,6 +406,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         await warmupService.close()
         await webhookService.close()
         await backupService.close()
+        await functionService.close()
         await sessionPool.close()
         await platformUserRepository.close()
         await redis.quit()
@@ -400,6 +424,7 @@ export async function createApp(options: AppBuildOptions = {}): Promise<AppConte
         backupService,
         systemHealthService,
         webhookService,
+        functionService,
         sessionPool,
         realtimeBridge,
         warmupService,

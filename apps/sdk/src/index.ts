@@ -24,10 +24,12 @@
  * ```
  */
 
+import { functionInvocationResultSchema, oqlQueryResultSchema } from '@openbase/core'
 import type { TransactionOperation } from './types.js'
 import { QueryBuilder } from './QueryBuilder.js'
 import { OpenBaseAdminClient } from './AdminClient.js'
 import { AuthClient } from './AuthClient.js'
+import { parseApiEnvelope } from './http.js'
 import { StorageClient } from './StorageClient.js'
 import { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
 import { TransactionClient } from './TransactionClient.js'
@@ -105,6 +107,60 @@ export class OpenBaseClient {
         return this.transactions.execute(operations)
     }
 
+    async oql(query: string) {
+        try {
+            const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
+            const token = this.auth.getAccessToken() || this.apiKey
+            const response = await fetchFn(`${this.projectUrl}/api/v1/${this.projectId}/oql`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    apikey: this.apiKey,
+                },
+                body: JSON.stringify({ query }),
+            })
+
+            const result = await parseApiEnvelope(response, oqlQueryResultSchema)
+            return {
+                data: result.data,
+                error: result.error ? { message: result.error.message, code: result.error.code } : null,
+            }
+        } catch (error) {
+            return {
+                data: null,
+                error: { message: (error as Error).message, code: 'NETWORK_ERROR' },
+            }
+        }
+    }
+
+    async rpc(name: string, params?: unknown) {
+        try {
+            const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
+            const token = this.auth.getAccessToken() || this.apiKey
+            const response = await fetchFn(`${this.projectUrl}/api/v1/${this.projectId}/functions/${encodeURIComponent(name)}`, {
+                method: 'POST',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    apikey: this.apiKey,
+                },
+                body: JSON.stringify({ params: params ?? {} }),
+            })
+
+            const result = await parseApiEnvelope(response, functionInvocationResultSchema)
+            return {
+                data: result.data,
+                error: result.error ? { message: result.error.message, code: result.error.code } : null,
+            }
+        } catch (error) {
+            return {
+                data: null,
+                error: { message: (error as Error).message, code: 'NETWORK_ERROR' },
+            }
+        }
+    }
+
     /**
      * Extract projectId from the JWT anon key.
      */
@@ -163,6 +219,10 @@ export { RealtimeClient, RealtimeChannel } from './RealtimeClient.js'
 export { TransactionClient } from './TransactionClient.js'
 export { generateTypescriptSchemaClient } from './typegen.js'
 export type {
+    FunctionDefinition,
+    FunctionInvocationResult,
+    FunctionLogEntry,
+    OqlQueryResult,
     QueryResult,
     AuthResult,
     RealtimePayload,

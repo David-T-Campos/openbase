@@ -162,6 +162,88 @@ export interface SchemaExport {
     appliedMigrations: string[]
 }
 
+export type OqlJoinType = 'inner' | 'left'
+export type OqlComparisonOperator = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'like' | 'ilike' | 'in' | 'is'
+export type OqlAggregateFunction = 'count' | 'sum' | 'avg' | 'min' | 'max'
+
+export interface OqlResultColumn {
+    key: string
+    label: string
+    source: string | null
+    aggregate?: OqlAggregateFunction | null
+}
+
+export interface OqlQueryResult {
+    query: string
+    columns: OqlResultColumn[]
+    rows: Record<string, unknown>[]
+    rowCount: number
+    durationMs: number
+    sourceTables: string[]
+}
+
+export type FunctionRuntime = 'javascript' | 'typescript'
+export type FunctionTriggerType = 'rpc' | 'webhook' | 'cron'
+export type FunctionInvocationAccess = 'public' | 'authenticated' | 'service_role'
+export type FunctionLogLevel = 'info' | 'error'
+
+export interface FunctionRpcConfig {
+    enabled: boolean
+    access: FunctionInvocationAccess
+}
+
+export interface FunctionWebhookConfig {
+    enabled: boolean
+    secret: string | null
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+}
+
+export interface FunctionScheduleConfig {
+    enabled: boolean
+    cron: string | null
+    nextRunAt?: string | null
+    lastRunAt?: string | null
+}
+
+export interface FunctionDefinition {
+    name: string
+    description?: string
+    runtime: FunctionRuntime
+    source: string
+    deployedSource?: string | null
+    version: number
+    timeoutMs: number
+    createdAt: string
+    updatedAt: string
+    deployedAt: string | null
+    rpc: FunctionRpcConfig
+    webhook: FunctionWebhookConfig
+    schedule: FunctionScheduleConfig
+    lastInvocationAt?: string | null
+    lastInvocationStatus?: 'success' | 'error' | null
+    lastInvocationError?: string | null
+}
+
+export interface FunctionLogEntry {
+    id: string
+    functionName: string
+    trigger: FunctionTriggerType
+    level: FunctionLogLevel
+    message: string
+    timestamp: string
+    durationMs?: number
+    requestId?: string | null
+    details?: unknown
+}
+
+export interface FunctionInvocationResult {
+    functionName: string
+    trigger: FunctionTriggerType
+    durationMs: number
+    data: unknown
+    logs: FunctionLogEntry[]
+}
+
 // ─── Query Types ─────────────────────────────────────────────
 
 /** Supported filter operators */
@@ -356,6 +438,8 @@ export type ProjectPermission =
     | 'members.manage'
     | 'roles.read'
     | 'roles.manage'
+    | 'functions.read'
+    | 'functions.manage'
 
 export interface ProjectRoleDefinition {
     key: string

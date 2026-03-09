@@ -39,6 +39,8 @@ const ALL_PERMISSIONS: ProjectPermission[] = [
     'members.manage',
     'roles.read',
     'roles.manage',
+    'functions.read',
+    'functions.manage',
 ]
 
 const SYSTEM_ROLES: Record<string, ProjectRoleDefinition> = {
@@ -73,6 +75,8 @@ const SYSTEM_ROLES: Record<string, ProjectRoleDefinition> = {
             'settings.manage',
             'members.read',
             'roles.read',
+            'functions.read',
+            'functions.manage',
         ],
         system: true,
     },
@@ -93,6 +97,7 @@ const SYSTEM_ROLES: Record<string, ProjectRoleDefinition> = {
             'logs.read',
             'audit.read',
             'settings.read',
+            'functions.read',
         ],
         system: true,
     },
@@ -110,6 +115,7 @@ const SYSTEM_ROLES: Record<string, ProjectRoleDefinition> = {
             'logs.read',
             'audit.read',
             'settings.read',
+            'functions.read',
         ],
         system: true,
     },

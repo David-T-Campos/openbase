@@ -274,7 +274,7 @@ export class QueryEngine {
             offsetId = page[page.length - 1]?.id
         }
 
-        return allMessages
+        return allMessages.sort((left, right) => left.id - right.id)
     }
 
     private async ensureUniqueConstraints(

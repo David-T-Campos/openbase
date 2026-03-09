@@ -289,6 +289,8 @@ export const projectPermissionSchema = z.enum([
     'members.manage',
     'roles.read',
     'roles.manage',
+    'functions.read',
+    'functions.manage',
 ])
 
 export const projectRoleDefinitionSchema = z.object({
@@ -459,6 +461,79 @@ export const schemaExportSchema = z.object({
     tables: z.record(tableSchemaSchema),
     migrations: z.array(migrationHistoryEntrySchema),
     appliedMigrations: z.array(z.string()),
+})
+
+export const oqlResultColumnSchema = z.object({
+    key: z.string(),
+    label: z.string(),
+    source: z.string().nullable(),
+    aggregate: z.enum(['count', 'sum', 'avg', 'min', 'max']).nullable().optional(),
+})
+
+export const oqlQueryResultSchema = z.object({
+    query: z.string(),
+    columns: z.array(oqlResultColumnSchema),
+    rows: z.array(z.record(z.unknown())),
+    rowCount: z.number(),
+    durationMs: z.number(),
+    sourceTables: z.array(z.string()),
+})
+
+export const functionRpcConfigSchema = z.object({
+    enabled: z.boolean(),
+    access: z.enum(['public', 'authenticated', 'service_role']),
+})
+
+export const functionWebhookConfigSchema = z.object({
+    enabled: z.boolean(),
+    secret: z.string().nullable(),
+    method: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']),
+})
+
+export const functionScheduleConfigSchema = z.object({
+    enabled: z.boolean(),
+    cron: z.string().nullable(),
+    nextRunAt: z.string().nullable().optional(),
+    lastRunAt: z.string().nullable().optional(),
+})
+
+export const functionDefinitionSchema = z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    runtime: z.enum(['javascript', 'typescript']),
+    source: z.string(),
+    deployedSource: z.string().nullable().optional(),
+    version: z.number(),
+    timeoutMs: z.number(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    deployedAt: z.string().nullable(),
+    rpc: functionRpcConfigSchema,
+    webhook: functionWebhookConfigSchema,
+    schedule: functionScheduleConfigSchema,
+    lastInvocationAt: z.string().nullable().optional(),
+    lastInvocationStatus: z.enum(['success', 'error']).nullable().optional(),
+    lastInvocationError: z.string().nullable().optional(),
+})
+
+export const functionLogEntrySchema = z.object({
+    id: z.string(),
+    functionName: z.string(),
+    trigger: z.enum(['rpc', 'webhook', 'cron']),
+    level: z.enum(['info', 'error']),
+    message: z.string(),
+    timestamp: z.string(),
+    durationMs: z.number().optional(),
+    requestId: z.string().nullable().optional(),
+    details: z.unknown().optional(),
+})
+
+export const functionInvocationResultSchema = z.object({
+    functionName: z.string(),
+    trigger: z.enum(['rpc', 'webhook', 'cron']),
+    durationMs: z.number(),
+    data: z.unknown(),
+    logs: z.array(functionLogEntrySchema),
 })
 
 export const apiErrorPayloadSchema = z.object({

@@ -30,6 +30,8 @@ const openbase = createClient('http://localhost:3001', 'your-anon-key')
 ### Client members
 
 - `openbase.from(table)` - creates a `QueryBuilder`
+- `openbase.oql(query)` - runs an OQL query
+- `openbase.rpc(name, params?)` - invokes a deployed function over RPC
 - `openbase.auth` - `AuthClient`
 - `openbase.storage` - `StorageClient`
 - `openbase.realtime` - `RealtimeClient`
@@ -205,6 +207,27 @@ await openbase.from('posts').upsert(
   { onConflict: 'id' }
 )
 ```
+
+## OQL
+
+### `oql(query)`
+
+Runs an OpenBase Query Language statement against the current project.
+
+```ts
+const { data, error } = await openbase.oql(
+  "from posts | where posts.status = 'published' | select posts.id, posts.title | limit 20"
+)
+```
+
+Returns an `OqlQueryResult` envelope with:
+
+- `query`
+- `columns`
+- `rows`
+- `rowCount`
+- `durationMs`
+- `sourceTables`
 
 ## AuthClient
 
@@ -542,6 +565,86 @@ The object returned by `.subscribe()` exposes:
 
 ```ts
 subscription.unsubscribe()
+```
+
+## Functions RPC
+
+### `rpc(name, params?)`
+
+Invokes a deployed project function over RPC.
+
+```ts
+const { data, error } = await openbase.rpc('published-posts', {
+  status: 'published',
+})
+```
+
+The response contains a `FunctionInvocationResult`:
+
+- `functionName`
+- `trigger`
+- `durationMs`
+- `data`
+- `logs`
+
+## Admin client
+
+Use `createAdminClient(projectUrl, serviceRoleKey)` for privileged server-side access.
+
+```ts
+import { createAdminClient } from 'openbase-js'
+
+const admin = createAdminClient('http://localhost:3001', 'service-role-key')
+```
+
+### `admin.oql(query)`
+
+Runs OQL with the service-role client.
+
+```ts
+const { data, error } = await admin.oql(
+  "from posts | select posts.id, posts.title | limit 10"
+)
+```
+
+### `admin.rpc(name, params?)`
+
+Invokes a deployed function with privileged access.
+
+```ts
+const { data, error } = await admin.rpc('rebuild-cache', {
+  reason: 'manual',
+})
+```
+
+### `admin.admin.functions.*`
+
+The admin client exposes function management helpers:
+
+- `admin.admin.functions.list()`
+- `admin.admin.functions.get(name)`
+- `admin.admin.functions.save(definition)`
+- `admin.admin.functions.deploy(name)`
+- `admin.admin.functions.logs(name)`
+- `admin.admin.functions.delete(name)`
+
+Example:
+
+```ts
+await admin.admin.functions.save({
+  name: 'published-posts',
+  runtime: 'typescript',
+  source: `
+export default async function handler({ db, params }) {
+  const rows = await db.from('posts').select('title').eq('status', params.status || 'published')
+  return { titles: rows.data?.map(row => row.title) ?? [] }
+}
+  `,
+  rpc: { enabled: true, access: 'authenticated' },
+})
+
+await admin.admin.functions.deploy('published-posts')
+const logs = await admin.admin.functions.logs('published-posts')
 ```
 
 ## Notes

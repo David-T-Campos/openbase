@@ -51,6 +51,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
         const address = context.app.server.address()
         if (address && typeof address !== 'string') {
             baseUrl = `http://127.0.0.1:${address.port}`
+            context.functionService.setRuntimeBaseUrl(baseUrl)
         }
     }
 

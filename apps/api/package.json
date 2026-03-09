@@ -21,6 +21,7 @@
         "@fastify/websocket": "^8.3.0",
         "@openbase/core": "workspace:*",
         "@openbase/telegram": "workspace:*",
+        "openbase-js": "workspace:*",
         "bcryptjs": "^3.0.3",
         "better-sqlite3": "^11.8.1",
         "bullmq": "^5.4.0",
@@ -35,6 +36,7 @@
         "socket.io": "^4.7.0",
         "sql.js": "^1.14.0",
         "telegram": "^2.22.0",
+        "typescript": "^5.4.0",
         "zod": "^3.22.0"
     },
     "devDependencies": {
@@ -46,7 +48,6 @@
         "rimraf": "^5.0.0",
         "socket.io-client": "^4.8.1",
         "tsx": "^4.7.0",
-        "typescript": "^5.4.0",
         "vitest": "^1.4.0"
     }
 }

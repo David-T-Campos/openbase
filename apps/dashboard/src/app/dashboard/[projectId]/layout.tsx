@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import {
     Activity,
     ArrowLeft,
+    Binary,
     Database,
     FileCode2,
     Fingerprint,
@@ -33,11 +34,13 @@ interface Project {
 const navItems = [
     { label: 'Overview', path: '', icon: LayoutDashboard, permission: 'project.read' },
     { label: 'Table editor', path: '/editor', icon: Database, permission: 'tables.read' },
+    { label: 'OQL', path: '/oql', icon: Binary, permission: 'tables.read' },
     { label: 'Migrations', path: '/migrations', icon: FileCode2, permission: 'migrations.read' },
     { label: 'Auth', path: '/auth', icon: Shield, permission: 'auth.read' },
     { label: 'Team', path: '/team', icon: Users2, permission: 'members.read' },
     { label: 'Storage', path: '/storage', icon: FolderOpen, permission: 'storage.read' },
     { label: 'Realtime', path: '/realtime', icon: Activity, permission: 'tables.read' },
+    { label: 'Functions', path: '/functions', icon: FileCode2, permission: 'functions.read' },
     { label: 'Audit', path: '/audit', icon: Fingerprint, permission: 'audit.read' },
     { label: 'Settings', path: '/settings', icon: Settings, permission: 'settings.read' },
     { label: 'Logs', path: '/logs', icon: ScrollText, permission: 'logs.read' },

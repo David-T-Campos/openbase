@@ -25,6 +25,8 @@ Because OpenBase is open source and self-hosted, there is no vendor lock-in. You
 | Realtime | ✅ | ✅ |
 | Row Level Security | ✅ | ✅ |
 | Webhooks | ✅ | ✅ |
+| OQL query layer | ✅ | ❌ |
+| Server-side functions | ✅ | ✅ |
 | Dashboard | ✅ | ✅ |
 | JavaScript SDK | ✅ | ✅ |
 | Full SQL / Postgres engine | ❌ | ✅ |
@@ -304,6 +306,25 @@ Command notes:
 - `openbase seed` inserts rows from a JSON seed file shaped like `{ "tables": { "posts": [{ ... }] } }`.
 - `openbase gen types` introspects the live project schema and emits a typed TypeScript client helper.
 
+## OQL
+
+OpenBase Query Language is a project-aware analytical query layer for Telegram-backed tables. It is not SQL, but it supports the operations OpenBase can execute consistently across its storage model: selecting fields, joins, filters, grouping, ordering, limits, and aggregates.
+
+```ts
+const { data, error } = await openbase.oql(
+  "from posts | join authors on posts.author_id = authors.id | where posts.status = 'published' | select posts.title as title, authors.name as author | order by posts.title asc | limit 10"
+)
+```
+
+OQL is available from:
+
+- the dashboard OQL editor
+- `POST /api/v1/:projectId/oql`
+- `client.oql(query)` in `openbase-js`
+- `admin.oql(query)` in the admin SDK
+
+See [docs/oql-functions.md](./docs/oql-functions.md) for the full language guide and functions runtime reference.
+
 ## SDK Usage
 
 OpenBase ships with a JavaScript/TypeScript SDK in `apps/sdk` with a Supabase-style API.
@@ -372,6 +393,14 @@ const { data, error } = await openbase
   .ilike('title', '%guide%')
   .order('views', { ascending: false })
   .range(0, 19)
+```
+
+#### OQL
+
+```ts
+const { data, error } = await openbase.oql(
+  "from posts | where posts.status = 'published' | select posts.id, posts.title | order by posts.created_at desc | limit 20"
+)
 ```
 
 ### Auth
@@ -505,6 +534,40 @@ openbase
 
 openbase.channel('presence-room').track('alice', 'online')
 ```
+
+### Functions
+
+#### Call a deployed function over RPC
+
+```ts
+const { data, error } = await openbase.rpc('published-posts', {
+  status: 'published',
+})
+```
+
+#### Manage functions with the admin client
+
+```ts
+import { createAdminClient } from 'openbase-js'
+
+const admin = createAdminClient('http://localhost:3001', 'your-service-role-key')
+
+await admin.admin.functions.save({
+  name: 'published-posts',
+  runtime: 'typescript',
+  source: `
+export default async function handler({ db, params }) {
+  const rows = await db.from('posts').select('title').eq('status', params.status || 'published')
+  return { titles: rows.data?.map(row => row.title) ?? [] }
+}
+  `,
+  rpc: { enabled: true, access: 'authenticated' },
+})
+
+await admin.admin.functions.deploy('published-posts')
+```
+
+The dashboard also includes a project-scoped Functions page for create, edit, deploy, webhook configuration, cron schedules, and log inspection. Full details live in [docs/oql-functions.md](./docs/oql-functions.md).
 
 ## Repository Layout
 

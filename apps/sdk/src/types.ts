@@ -1,4 +1,8 @@
 import type {
+    FunctionDefinition,
+    FunctionInvocationResult,
+    FunctionLogEntry,
+    OqlQueryResult,
     QueryFilter,
     RealtimeFilterExpression,
     StorageObjectPolicy,
@@ -7,7 +11,17 @@ import type {
     TransactionResult,
 } from '@openbase/core'
 
-export type { QueryFilter, StorageObjectPolicy, StorageRule, TransactionOperation, TransactionResult }
+export type {
+    FunctionDefinition,
+    FunctionInvocationResult,
+    FunctionLogEntry,
+    OqlQueryResult,
+    QueryFilter,
+    StorageObjectPolicy,
+    StorageRule,
+    TransactionOperation,
+    TransactionResult,
+}
 
 /** Result from any SDK operation */
 export interface QueryResult<T = Record<string, unknown>> {
