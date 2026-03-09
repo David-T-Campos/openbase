@@ -34,6 +34,16 @@ interface DeletedMessageSubscription {
     handler: (channelId: string, messageIds: number[]) => void
 }
 
+interface StoredMessageSubscription {
+    channels: ChannelInput[]
+    handler: (channelId: string, messageId: number, text: string) => void
+}
+
+interface StoredDeleteSubscription {
+    channels: ChannelInput[]
+    handler: (channelId: string, messageIds: number[]) => void
+}
+
 export class MockStorageProvider implements EventedStorageProvider {
     private static nextProviderId = 1
     private static nextChannelId = 1
@@ -61,9 +71,17 @@ export class MockStorageProvider implements EventedStorageProvider {
 
     private readonly providerId = MockStorageProvider.nextProviderId++
     private connected = false
+    private readonly newMessageSubscriptions: StoredMessageSubscription[] = []
+    private readonly editedMessageSubscriptions: StoredMessageSubscription[] = []
+    private readonly deletedMessageSubscriptions: StoredDeleteSubscription[] = []
 
     async connect(_sessionString: string): Promise<void> {
+        if (this.connected) {
+            return
+        }
+
         this.connected = true
+        this.attachStoredSubscriptions()
     }
 
     async disconnect(): Promise<void> {
@@ -256,11 +274,8 @@ export class MockStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageId: number, text: string) => void
     ): void {
         this.requireConnected()
-        MockStorageProvider.newMessageSubscriptions.push({
-            ownerId: this.providerId,
-            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
-            handler,
-        })
+        this.newMessageSubscriptions.push({ channels, handler })
+        this.attachNewMessageHandler(channels, handler)
     }
 
     addEditedMessageHandler(
@@ -268,11 +283,8 @@ export class MockStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageId: number, text: string) => void
     ): void {
         this.requireConnected()
-        MockStorageProvider.editedMessageSubscriptions.push({
-            ownerId: this.providerId,
-            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
-            handler,
-        })
+        this.editedMessageSubscriptions.push({ channels, handler })
+        this.attachEditedMessageHandler(channels, handler)
     }
 
     addDeletedMessageHandler(
@@ -280,11 +292,8 @@ export class MockStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageIds: number[]) => void
     ): void {
         this.requireConnected()
-        MockStorageProvider.deletedMessageSubscriptions.push({
-            ownerId: this.providerId,
-            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
-            handler,
-        })
+        this.deletedMessageSubscriptions.push({ channels, handler })
+        this.attachDeletedMessageHandler(channels, handler)
     }
 
     private requireConnected(): void {
@@ -332,5 +341,52 @@ export class MockStorageProvider implements EventedStorageProvider {
                 subscription.handler(channelId, messageIds)
             }
         }
+    }
+
+    private attachStoredSubscriptions(): void {
+        for (const subscription of this.newMessageSubscriptions) {
+            this.attachNewMessageHandler(subscription.channels, subscription.handler)
+        }
+
+        for (const subscription of this.editedMessageSubscriptions) {
+            this.attachEditedMessageHandler(subscription.channels, subscription.handler)
+        }
+
+        for (const subscription of this.deletedMessageSubscriptions) {
+            this.attachDeletedMessageHandler(subscription.channels, subscription.handler)
+        }
+    }
+
+    private attachNewMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageId: number, text: string) => void
+    ): void {
+        MockStorageProvider.newMessageSubscriptions.push({
+            ownerId: this.providerId,
+            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
+            handler,
+        })
+    }
+
+    private attachEditedMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageId: number, text: string) => void
+    ): void {
+        MockStorageProvider.editedMessageSubscriptions.push({
+            ownerId: this.providerId,
+            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
+            handler,
+        })
+    }
+
+    private attachDeletedMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageIds: number[]) => void
+    ): void {
+        MockStorageProvider.deletedMessageSubscriptions.push({
+            ownerId: this.providerId,
+            channelIds: new Set(channels.map(channel => this.resolveChannel(channel).id)),
+            handler,
+        })
     }
 }

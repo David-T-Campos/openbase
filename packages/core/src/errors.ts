@@ -78,10 +78,3 @@ export class StorageProviderError extends OpenBaseError {
     }
 }
 
-/** All workers on cooldown */
-export class WorkerPoolExhaustedError extends OpenBaseError {
-    constructor() {
-        super('All workers on cooldown. Please try again shortly.', 'WORKER_POOL_EXHAUSTED', 503)
-        this.name = 'WorkerPoolExhaustedError'
-    }
-}

@@ -7,7 +7,7 @@ import type Redis from 'ioredis'
 import type { Project, ProjectStatus, TelegramChannelRef } from '@openbase/core'
 import { sleep as defaultSleep } from '@openbase/core'
 import { EncryptionService } from '../encryption/EncryptionService.js'
-import { TelegramProviderFactory } from '../telegram/TelegramProviderFactory.js'
+import { TelegramSessionPool } from '../telegram/TelegramSessionPool.js'
 
 const DEFAULT_DAY_MS = 24 * 60 * 60 * 1000
 const DEFAULT_QUEUE_NAME = 'openbase-warmup'
@@ -44,7 +44,7 @@ export class WarmupService {
     private readonly worker?: Worker<WarmupJobData>
 
     constructor(
-        private readonly providerFactory: TelegramProviderFactory,
+        private readonly sessionPool: TelegramSessionPool,
         private readonly redis: Redis,
         private readonly encryptionService: EncryptionService,
         private readonly masterKey: Buffer,
@@ -146,7 +146,8 @@ export class WarmupService {
                 this.masterKey
             )
 
-            await this.providerFactory.withSession(sessionString, async provider => {
+            this.sessionPool.registerProject(project, sessionString)
+            await this.sessionPool.withProject(project, sessionString, async provider => {
                 const operations = Math.floor(2 + Math.random() * 3)
 
                 for (let index = 0; index < operations; index++) {

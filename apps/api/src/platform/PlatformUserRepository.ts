@@ -1,5 +1,5 @@
-import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import Database from 'better-sqlite3'
+import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 
 export interface PlatformUser {
@@ -10,65 +10,17 @@ export interface PlatformUser {
 }
 
 export class PlatformUserRepository {
-    private db!: SqlJsDatabase
-    private readonly dbPath: string
-    private readonly ready: Promise<void>
+    private readonly db: Database.Database
 
     constructor(dbPath: string = './data/platform.db') {
-        this.dbPath = dbPath
-        this.ready = this.init()
-    }
+        mkdirSync(dirname(dbPath), { recursive: true })
 
-    async findByEmail(email: string): Promise<PlatformUser | null> {
-        await this.ensureReady()
-        const result = this.db.exec(
-            'SELECT id, email, password_hash, created_at FROM platform_users WHERE email = ?',
-            [email]
-        )
+        this.db = new Database(dbPath)
+        this.db.pragma('journal_mode = WAL')
+        this.db.pragma('synchronous = NORMAL')
+        this.db.pragma('busy_timeout = 5000')
 
-        if (!result.length || !result[0].values.length) {
-            return null
-        }
-
-        const [id, userEmail, passwordHash, createdAt] = result[0].values[0] as [string, string, string, string]
-        return { id, email: userEmail, passwordHash, createdAt }
-    }
-
-    async findById(id: string): Promise<PlatformUser | null> {
-        await this.ensureReady()
-        const result = this.db.exec(
-            'SELECT id, email, password_hash, created_at FROM platform_users WHERE id = ?',
-            [id]
-        )
-
-        if (!result.length || !result[0].values.length) {
-            return null
-        }
-
-        const [userId, email, passwordHash, createdAt] = result[0].values[0] as [string, string, string, string]
-        return { id: userId, email, passwordHash, createdAt }
-    }
-
-    async createUser(user: PlatformUser): Promise<void> {
-        await this.ensureReady()
-        this.db.run(
-            'INSERT INTO platform_users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',
-            [user.id, user.email, user.passwordHash, user.createdAt]
-        )
-        this.persist()
-    }
-
-    private async init(): Promise<void> {
-        const SQL = await initSqlJs()
-        mkdirSync(dirname(this.dbPath), { recursive: true })
-
-        if (existsSync(this.dbPath)) {
-            this.db = new SQL.Database(readFileSync(this.dbPath))
-        } else {
-            this.db = new SQL.Database()
-        }
-
-        this.db.run(`
+        this.db.exec(`
             CREATE TABLE IF NOT EXISTS platform_users (
                 id TEXT PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
@@ -76,15 +28,64 @@ export class PlatformUserRepository {
                 created_at TEXT NOT NULL
             )
         `)
-
-        this.persist()
     }
 
-    private async ensureReady(): Promise<void> {
-        await this.ready
+    async findByEmail(email: string): Promise<PlatformUser | null> {
+        const row = this.db
+            .prepare(`
+                SELECT id, email, password_hash, created_at
+                FROM platform_users
+                WHERE email = ?
+            `)
+            .get(email) as
+            | { id: string; email: string; password_hash: string; created_at: string }
+            | undefined
+
+        if (!row) {
+            return null
+        }
+
+        return {
+            id: row.id,
+            email: row.email,
+            passwordHash: row.password_hash,
+            createdAt: row.created_at,
+        }
     }
 
-    private persist(): void {
-        writeFileSync(this.dbPath, Buffer.from(this.db.export()))
+    async findById(id: string): Promise<PlatformUser | null> {
+        const row = this.db
+            .prepare(`
+                SELECT id, email, password_hash, created_at
+                FROM platform_users
+                WHERE id = ?
+            `)
+            .get(id) as
+            | { id: string; email: string; password_hash: string; created_at: string }
+            | undefined
+
+        if (!row) {
+            return null
+        }
+
+        return {
+            id: row.id,
+            email: row.email,
+            passwordHash: row.password_hash,
+            createdAt: row.created_at,
+        }
+    }
+
+    async createUser(user: PlatformUser): Promise<void> {
+        this.db
+            .prepare(`
+                INSERT INTO platform_users (id, email, password_hash, created_at)
+                VALUES (?, ?, ?, ?)
+            `)
+            .run(user.id, user.email, user.passwordHash, user.createdAt)
+    }
+
+    async close(): Promise<void> {
+        this.db.close()
     }
 }

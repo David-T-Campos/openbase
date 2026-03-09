@@ -2,14 +2,14 @@ import type { Project } from '@openbase/core'
 import { safeJsonParse } from '@openbase/core'
 import type { EventedStorageProvider } from '@openbase/telegram'
 import { ProjectService } from '../projects/ProjectService.js'
-import { TelegramProviderFactory } from '../telegram/TelegramProviderFactory.js'
+import { TelegramSessionPool } from '../telegram/TelegramSessionPool.js'
 import { RealtimeService } from './RealtimeService.js'
 
 export class TelegramRealtimeBridge {
     private readonly providers = new Map<string, EventedStorageProvider>()
 
     constructor(
-        private readonly providerFactory: TelegramProviderFactory,
+        private readonly sessionPool: TelegramSessionPool,
         private readonly projectService: ProjectService,
         private readonly realtimeService: RealtimeService
     ) { }
@@ -34,9 +34,8 @@ export class TelegramRealtimeBridge {
         }
 
         try {
-            const provider = await this.providerFactory.createConnectedProvider(
-                this.projectService.decryptSession(project)
-            )
+            const sessionString = this.projectService.decryptSession(project)
+            const provider = await this.sessionPool.getProjectProvider(project, sessionString)
 
             const channels = Object.values(project.channelMap)
             provider.addNewMessageHandler(channels, (channelId, messageId, text) => {
@@ -95,9 +94,6 @@ export class TelegramRealtimeBridge {
     }
 
     async close(): Promise<void> {
-        await Promise.all(
-            [...this.providers.values()].map(provider => provider.disconnect().catch(() => undefined))
-        )
         this.providers.clear()
     }
 

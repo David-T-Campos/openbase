@@ -1,5 +1,7 @@
 'use client'
 
+import { z } from 'zod'
+
 const PLATFORM_ACCESS_TOKEN_KEY = 'openbase_platform_token'
 const PLATFORM_REFRESH_TOKEN_KEY = 'openbase_platform_refresh'
 const PROJECT_SESSION_PREFIX = 'openbase_project_session:'
@@ -164,4 +166,20 @@ export async function authenticatedFetch(input: string, init: RequestInit = {}):
 
     response = await execute(refreshedToken)
     return response
+}
+
+export async function readApiEnvelope<TSchema extends z.ZodTypeAny>(
+    response: Response,
+    schema: TSchema
+): Promise<z.infer<TSchema>> {
+    const payload = await response.json() as {
+        data?: unknown
+        error?: { message?: string } | null
+    }
+
+    if (!response.ok || payload.error) {
+        throw new Error(payload.error?.message || `HTTP ${response.status}`)
+    }
+
+    return schema.parse(payload.data)
 }

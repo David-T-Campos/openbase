@@ -6,7 +6,9 @@ import type { FastifyInstance, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { platformAuthMiddleware } from '../middleware/auth.js'
 import type { RequestLogService } from '../logs/RequestLogService.js'
+import type { OperationsLogService } from '../ops/OperationsLogService.js'
 import type { ProjectService } from '../projects/ProjectService.js'
+import type { TelegramSessionPool } from '../telegram/TelegramSessionPool.js'
 import type { WarmupService } from '../warmup/WarmupService.js'
 import type { WebhookService } from '../webhooks/WebhookService.js'
 
@@ -33,7 +35,9 @@ export function registerProjectRoutes(
     projectService: ProjectService,
     warmupService: WarmupService,
     requestLogService: RequestLogService,
-    webhookService: WebhookService
+    webhookService: WebhookService,
+    operationsLogService: OperationsLogService,
+    telegramSessionPool: TelegramSessionPool
 ): void {
     app.post(
         '/api/v1/projects',
@@ -170,12 +174,56 @@ export function registerProjectRoutes(
     )
 
     app.get<{ Params: { projectId: string } }>(
+        '/api/v1/projects/:projectId/operations',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = await assertProjectOwner(projectService, request)
+            const logs = await operationsLogService.listProject(project.id, 100)
+            return reply.send({ data: logs })
+        }
+    )
+
+    app.get<{ Params: { projectId: string } }>(
+        '/api/v1/projects/:projectId/telegram/session',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = await assertProjectOwner(projectService, request)
+            const health = telegramSessionPool.getHealth(project.id)
+            return reply.send({ data: health })
+        }
+    )
+
+    app.get<{ Params: { projectId: string } }>(
         '/api/v1/projects/:projectId/webhooks',
         { preHandler: [platformAuthMiddleware] },
         async (request, reply) => {
             const project = await assertProjectOwner(projectService, request)
             const webhooks = await webhookService.listConfigs(project.id)
             return reply.send({ data: webhooks })
+        }
+    )
+
+    app.get<{ Params: { projectId: string } }>(
+        '/api/v1/projects/:projectId/webhooks/dead',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = await assertProjectOwner(projectService, request)
+            const deadLetters = await webhookService.listDeadLetters(project.id)
+            return reply.send({ data: deadLetters })
+        }
+    )
+
+    app.post<{ Params: { projectId: string; deadLetterId: string } }>(
+        '/api/v1/projects/:projectId/webhooks/dead/:deadLetterId/replay',
+        { preHandler: [platformAuthMiddleware] },
+        async (request, reply) => {
+            const project = await assertProjectOwner(projectService, request)
+            const replayed = await webhookService.replayDeadLetter(project.id, request.params.deadLetterId)
+            if (!replayed) {
+                return reply.status(404).send({ error: { message: 'Dead-letter not found' } })
+            }
+
+            return reply.send({ data: replayed })
         }
     )
 
@@ -222,11 +270,30 @@ export function registerProjectRoutes(
 
     app.get('/health', async (_request, reply) => {
         return reply.send({
-            status: 'ok',
-            timestamp: new Date().toISOString(),
-            version: '0.1.0',
+            data: {
+                status: 'ok',
+                timestamp: new Date().toISOString(),
+                version: '0.1.0',
+            },
         })
     })
+
+    app.get(
+        '/api/v1/ops/logs',
+        { preHandler: [platformAuthMiddleware] },
+        async (_request, reply) => {
+            const logs = await operationsLogService.listGlobal(200)
+            return reply.send({ data: logs })
+        }
+    )
+
+    app.get(
+        '/api/v1/ops/telegram/sessions',
+        { preHandler: [platformAuthMiddleware] },
+        async (_request, reply) => {
+            return reply.send({ data: telegramSessionPool.listHealth() })
+        }
+    )
 }
 
 async function assertProjectOwner(

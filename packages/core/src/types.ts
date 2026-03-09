@@ -160,8 +160,16 @@ export interface WebhookConfig {
     enabled: boolean
     createdAt: string
     updatedAt: string
+    lastDeliveryAt?: string | null
+    lastSuccessAt?: string | null
     lastFailureAt?: string | null
     lastFailureReason?: string | null
+    lastStatusCode?: number | null
+    totalDeliveries?: number
+    totalSuccesses?: number
+    totalFailures?: number
+    consecutiveFailures?: number
+    lastReplayAt?: string | null
 }
 
 /** A project with all its configuration */
@@ -237,20 +245,74 @@ export interface RealtimeSubscription {
     unsubscribe: () => void
 }
 
+export interface ApiErrorPayload {
+    message: string
+    code: string
+    details?: unknown
+}
+
+export interface ApiSuccessEnvelope<T> {
+    data: T
+    error: null
+    meta?: Record<string, unknown>
+}
+
+export interface ApiErrorEnvelope {
+    data: null
+    error: ApiErrorPayload
+    meta?: Record<string, unknown>
+}
+
+export type ApiEnvelope<T> = ApiSuccessEnvelope<T> | ApiErrorEnvelope
+
+export interface RequestLogEntry {
+    id: string
+    method: string
+    path: string
+    projectId: string
+    statusCode: number
+    durationMs: number
+    timestamp: string
+}
+
+export interface OperationLogEntry {
+    id: string
+    projectId: string | null
+    scope: 'request' | 'webhook' | 'telegram' | 'system' | 'security'
+    level: 'info' | 'success' | 'warning' | 'error'
+    message: string
+    code?: string
+    metadata?: Record<string, unknown>
+    timestamp: string
+}
+
+export interface WebhookDeadLetter {
+    id: string
+    projectId: string
+    webhookId: string
+    url: string
+    eventType: 'INSERT' | 'UPDATE' | 'DELETE'
+    failedAt: string
+    errorMessage: string
+    attempts: number
+    statusCode?: number | null
+    payload: Record<string, unknown>
+}
+
+export interface TelegramSessionHealth {
+    projectId: string
+    status: 'idle' | 'connecting' | 'healthy' | 'degraded' | 'reconnecting' | 'disconnected'
+    connected: boolean
+    lastConnectedAt: string | null
+    lastCheckedAt: string | null
+    lastError: string | null
+    reconnectCount: number
+    probeChannelId: string | null
+}
+
 // ─── Pending Operation (WAL) ─────────────────────────────────
 
 /** Pending operation for the Write-Ahead Cache */
-export interface PendingOperation {
-    id: string
-    projectId: string
-    type: 'INSERT' | 'UPDATE' | 'DELETE'
-    tableName: string
-    channel: TelegramChannelRef
-    data: string
-    messageId?: number
-    timestamp: number
-}
-
 // ─── Encryption Types ────────────────────────────────────────
 
 /** Result of an encryption operation */

@@ -39,9 +39,9 @@ export function registerPlatformRoutes(
     jwtSecret: string,
     telegramApiId?: number,
     telegramApiHash?: string,
-    options: { mockTelegram?: boolean } = {}
+    options: { mockTelegram?: boolean; repository?: PlatformUserRepository } = {}
 ): void {
-    const repository = new PlatformUserRepository()
+    const repository = options.repository ?? new PlatformUserRepository()
     const platformAuthService = new PlatformAuthService(redis, jwtSecret)
     const mockTelegram = options.mockTelegram === true
 
@@ -67,8 +67,10 @@ export function registerPlatformRoutes(
         const session = platformAuthService.issueSession({ id: user.id, email: user.email })
 
         return reply.status(201).send({
-            user: { id: user.id, email: user.email, created_at: user.createdAt },
-            session,
+            data: {
+                user: { id: user.id, email: user.email, created_at: user.createdAt },
+                session,
+            },
         })
     })
 
@@ -91,8 +93,10 @@ export function registerPlatformRoutes(
         const session = platformAuthService.issueSession({ id: user.id, email: user.email })
 
         return reply.send({
-            user: { id: user.id, email: user.email, created_at: user.createdAt },
-            session,
+            data: {
+                user: { id: user.id, email: user.email, created_at: user.createdAt },
+                session,
+            },
         })
     })
 

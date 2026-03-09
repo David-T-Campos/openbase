@@ -1,6 +1,12 @@
 import type { QueryFilter, QueryResult, SelectOptions, UpsertOptions } from './types.js'
+import { parseApiEnvelope } from './http.js'
+import { z } from 'zod'
 
 type OperationType = 'select' | 'insert' | 'update' | 'delete' | 'upsert'
+
+const rowSchema = z.record(z.unknown())
+const rowsResponseSchema = z.union([z.array(rowSchema), rowSchema, z.null()])
+const countResponseSchema = z.object({ count: z.number() })
 
 export class QueryBuilder<T = Record<string, unknown>> {
     private filters: QueryFilter[] = []
@@ -128,31 +134,26 @@ export class QueryBuilder<T = Record<string, unknown>> {
                 body: this._body ? JSON.stringify(this._body) : undefined,
             })
 
-            const json = await response.json() as {
-                data?: T[] | T
-                error?: { message: string; code?: string }
-                count?: number
-            }
-
-            if (!response.ok) {
+            const result = await parseApiEnvelope(response, rowsResponseSchema)
+            if (result.error) {
                 return {
                     data: null,
-                    error: json.error || { message: `HTTP ${response.status}` },
+                    error: { message: result.error.message, code: result.error.code },
                     count: 0,
                 }
             }
 
             const count = await countPromise
-            const data = Array.isArray(json.data)
-                ? json.data
-                : json.data === null || json.data === undefined
+            const data = Array.isArray(result.data)
+                ? result.data
+                : result.data === null || result.data === undefined
                     ? null
-                    : [json.data]
+                    : [result.data]
 
             return {
-                data,
+                data: data as T[] | null,
                 error: null,
-                count: count ?? json.count,
+                count,
             }
         } catch (error) {
             return {
@@ -171,12 +172,12 @@ export class QueryBuilder<T = Record<string, unknown>> {
             headers,
         })
 
-        const json = await response.json() as { count?: number; error?: { message: string } }
-        if (!response.ok) {
-            throw new Error(json.error?.message || `HTTP ${response.status}`)
+        const result = await parseApiEnvelope(response, countResponseSchema)
+        if (result.error || !result.data) {
+            throw new Error(result.error?.message || `HTTP ${response.status}`)
         }
 
-        return json.count
+        return result.data.count
     }
 
     private addFilter(column: string, operator: string, value: unknown): this {

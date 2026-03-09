@@ -264,7 +264,7 @@ export function registerDatabaseRoutes(
                     rows = applyRLS(rows, findPolicy(schema.rls, 'SELECT'), request.user || null)
                 }
 
-                return reply.send({ count: rows.length })
+                return reply.send({ data: { count: rows.length } })
             })
         }
     )

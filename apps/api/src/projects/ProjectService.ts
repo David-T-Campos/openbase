@@ -11,11 +11,13 @@ import { ConflictError, ForbiddenError, NotFoundError, nowISO, sanitizeName } fr
 import type { StorageProvider } from '@openbase/telegram'
 import { EncryptionService } from '../encryption/EncryptionService.js'
 import { TelegramProviderFactory } from '../telegram/TelegramProviderFactory.js'
+import { TelegramSessionPool } from '../telegram/TelegramSessionPool.js'
 import { WarmupService } from '../warmup/WarmupService.js'
 
 export class ProjectService {
     constructor(
         private readonly providerFactory: TelegramProviderFactory,
+        private readonly sessionPool: TelegramSessionPool,
         private readonly redis: Redis,
         private readonly encryptionService: EncryptionService,
         private readonly warmupService: WarmupService,
@@ -88,6 +90,7 @@ export class ProjectService {
 
             await this.redis.set(`project:${projectId}`, JSON.stringify(project))
             await this.redis.sadd(`owner:${ownerId}:projects`, projectId)
+            this.sessionPool.registerProject(project, telegramSession)
 
             if (!this.skipWarmup) {
                 await this.warmupService.startWarmup(projectId, project.commitLogChannel)
@@ -241,6 +244,7 @@ export class ProjectService {
             this.redis.del(`logs:${projectId}`),
             this.redis.del(`project:${projectId}:webhooks`),
         ])
+        await this.sessionPool.closeProject(projectId)
 
         await this.redis.del(
             `ratelimit:token:${project.anonKey.slice(0, 32)}`,
@@ -268,10 +272,8 @@ export class ProjectService {
         fn: (project: Project, provider: StorageProvider) => Promise<T>
     ): Promise<T> {
         const sessionString = this.decryptSession(project)
-        return this.providerFactory.withSession(
-            sessionString,
-            provider => fn(project, provider)
-        )
+        this.sessionPool.registerProject(project, sessionString)
+        return this.sessionPool.withProject(project, sessionString, provider => fn(project, provider))
     }
 
     private issueProjectApiKey(projectId: string, role: 'anon' | 'service_role'): string {

@@ -2,7 +2,33 @@
  * StorageClient — Client-side file storage operations
  */
 
+import { z } from 'zod'
 import type { UploadOptions, TransformOptions } from './types.js'
+import { parseApiEnvelope } from './http.js'
+
+const bucketCreateSchema = z.object({
+    name: z.string(),
+})
+
+const uploadResultSchema = z.object({
+    path: z.string(),
+    publicUrl: z.string().url(),
+})
+
+const messageSchema = z.object({
+    message: z.string(),
+    path: z.string().optional(),
+})
+
+const fileListSchema = z.array(z.object({
+    path: z.string(),
+    size: z.number(),
+    mimeType: z.string(),
+}))
+
+const signedUrlSchema = z.object({
+    signedUrl: z.string().url(),
+})
 
 export class StorageClient {
     constructor(
@@ -44,10 +70,10 @@ export class StorageClient {
                 }
             )
 
-            const json = await response.json() as { data?: { name: string }; error?: { message: string } }
+            const result = await parseApiEnvelope(response, bucketCreateSchema)
             return {
-                data: json.data || null,
-                error: json.error || null,
+                data: result.data || null,
+                error: result.error ? { message: result.error.message } : null,
             }
         } catch (error) {
             return { data: null, error: { message: (error as Error).message } }
@@ -99,10 +125,10 @@ class StorageBucketClient {
                 }
             )
 
-            const json = await response.json() as { data?: { path: string }; error?: { message: string } }
+            const result = await parseApiEnvelope(response, uploadResultSchema)
             return {
-                data: json.data || null,
-                error: json.error || null,
+                data: result.data || null,
+                error: result.error ? { message: result.error.message } : null,
             }
         } catch (error) {
             return { data: null, error: { message: (error as Error).message } }
@@ -133,8 +159,11 @@ class StorageBucketClient {
             })
 
             if (!response.ok) {
-                const json = await response.json() as { error?: { message: string } }
-                return { data: null, error: json.error || { message: `HTTP ${response.status}` } }
+                const result = await parseApiEnvelope(response, z.unknown())
+                return {
+                    data: null,
+                    error: result.error ? { message: result.error.message } : { message: `HTTP ${response.status}` },
+                }
             }
 
             const blob = await response.blob()
@@ -153,7 +182,7 @@ class StorageBucketClient {
 
             for (const path of paths) {
                 const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
-                await fetchFn(
+                const response = await fetchFn(
                     `${this.projectUrl}/api/v1/${this.projectId}/storage/${this.bucket}/${encodeStoragePath(path)}`,
                     {
                         method: 'DELETE',
@@ -163,6 +192,11 @@ class StorageBucketClient {
                         },
                     }
                 )
+
+                const result = await parseApiEnvelope(response, messageSchema)
+                if (result.error) {
+                    return { data: null, error: { message: result.error.message } }
+                }
             }
 
             return { data: null, error: null }
@@ -190,10 +224,10 @@ class StorageBucketClient {
                 }
             )
 
-            const json = await response.json() as { data?: Array<{ path: string; size: number; mimeType: string }>; error?: { message: string } }
+            const result = await parseApiEnvelope(response, fileListSchema)
             return {
-                data: json.data || null,
-                error: json.error || null,
+                data: result.data || null,
+                error: result.error ? { message: result.error.message } : null,
             }
         } catch (error) {
             return { data: null, error: { message: (error as Error).message } }
@@ -230,10 +264,10 @@ class StorageBucketClient {
                 }
             )
 
-            const json = await response.json() as { data?: { signedUrl: string }; error?: { message: string } }
+            const result = await parseApiEnvelope(response, signedUrlSchema)
             return {
-                data: json.data || null,
-                error: json.error || null,
+                data: result.data || null,
+                error: result.error ? { message: result.error.message } : null,
             }
         } catch (error) {
             return { data: null, error: { message: (error as Error).message } }

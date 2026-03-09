@@ -2,7 +2,10 @@
  * AuthClient — Client-side authentication operations
  */
 
+import { authResultSchema, authSessionSchema, authUserSchema } from '@openbase/core'
+import { z } from 'zod'
 import type { AuthResult } from './types.js'
+import { parseApiEnvelope } from './http.js'
 
 type AuthError = { message: string }
 type AuthStateEvent = 'INITIAL_SESSION' | 'SIGNED_IN' | 'SIGNED_OUT' | 'TOKEN_REFRESHED'
@@ -13,15 +16,32 @@ type PasswordSignInResult = AuthResult | {
     user: AuthResult['user']
 }
 
+const messageSchema = z.object({
+    message: z.string(),
+})
+
+const passwordSignInSchema = z.union([
+    authResultSchema,
+    z.object({
+        mfa_required: z.literal(true),
+        challenge_token: z.string(),
+        user: authUserSchema,
+    }),
+])
+
+const sessionEnvelopeSchema = z.object({
+    session: authSessionSchema,
+})
+
 export class AuthClient {
     private accessToken: string | null = null
     private refreshToken: string | null = null
     private listeners = new Set<AuthStateListener>()
 
     constructor(
-        private projectUrl: string,
-        private projectId: string,
-        private apiKey: string
+        private readonly projectUrl: string,
+        private readonly projectId: string,
+        private readonly apiKey: string
     ) { }
 
     /** Sign up with email and password */
@@ -32,6 +52,7 @@ export class AuthClient {
     }): Promise<{ data: AuthResult | null; error: AuthError | null }> {
         const result = await this.request<AuthResult>('/auth/signup', {
             body: credentials,
+            schema: authResultSchema,
         })
 
         if (result.data?.session) {
@@ -49,6 +70,7 @@ export class AuthClient {
     }): Promise<{ data: PasswordSignInResult | null; error: AuthError | null }> {
         const result = await this.request<PasswordSignInResult>('/auth/signin', {
             body: credentials,
+            schema: passwordSignInSchema,
         })
 
         if (result.data && 'session' in result.data && result.data.session) {
@@ -71,8 +93,9 @@ export class AuthClient {
     async signInWithOtp(options: {
         email: string
     }): Promise<{ data: null; error: AuthError | null }> {
-        const result = await this.request<{ data: { message: string } }>('/auth/magic-link', {
+        const result = await this.request<{ message: string }>('/auth/magic-link', {
             body: { email: options.email },
+            schema: messageSchema,
         })
 
         return {
@@ -88,8 +111,9 @@ export class AuthClient {
             return { error: null }
         }
 
-        const result = await this.request<{ data: { message: string } }>('/auth/signout', {
+        const result = await this.request<{ message: string }>('/auth/signout', {
             body: { refresh_token: this.refreshToken },
+            schema: messageSchema,
         })
 
         if (result.error) {
@@ -127,13 +151,14 @@ export class AuthClient {
             return { data: { user: null }, error: { message: 'Not authenticated' } }
         }
 
-        const result = await this.request<{ data?: AuthResult['user'] }>('/auth/user', {
+        const result = await this.request<AuthResult['user']>('/auth/user', {
             method: 'GET',
             useAccessToken: true,
+            schema: authUserSchema,
         })
 
         return {
-            data: { user: result.data?.data || null },
+            data: { user: result.data || null },
             error: result.error,
         }
     }
@@ -147,11 +172,12 @@ export class AuthClient {
             return { data: { session: null }, error: { message: 'No refresh token' } }
         }
 
-        const result = await this.request<{ data?: { session?: AuthResult['session'] } }>('/auth/refresh', {
+        const result = await this.request<{ session: AuthResult['session'] }>('/auth/refresh', {
             body: { refresh_token: this.refreshToken },
+            schema: sessionEnvelopeSchema,
         })
 
-        const session = result.data?.data?.session || null
+        const session = result.data?.session || null
         if (session) {
             this.setSession(session, 'TOKEN_REFRESHED')
         }
@@ -212,12 +238,13 @@ export class AuthClient {
             method?: 'GET' | 'POST'
             body?: unknown
             useAccessToken?: boolean
-        } = {}
+            schema: z.ZodType<T>
+        }
     ): Promise<{ data: T | null; error: AuthError | null }> {
         try {
             const fetchFn = typeof globalThis.fetch !== 'undefined' ? globalThis.fetch : (await import('cross-fetch')).default
             const headers: Record<string, string> = {
-                'apikey': this.apiKey,
+                apikey: this.apiKey,
             }
 
             if (options.body !== undefined) {
@@ -237,16 +264,11 @@ export class AuthClient {
                 }
             )
 
-            const json = await response.json() as T & { error?: AuthError }
-
-            if (!response.ok) {
-                return {
-                    data: null,
-                    error: json.error || { message: `HTTP ${response.status}` },
-                }
+            const result = await parseApiEnvelope(response, options.schema)
+            return {
+                data: result.data as T | null,
+                error: result.error ? { message: result.error.message } : null,
             }
-
-            return { data: json as T, error: null }
         } catch (error) {
             return {
                 data: null,

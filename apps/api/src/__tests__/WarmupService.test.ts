@@ -71,14 +71,15 @@ describe('WarmupService', () => {
         const redis = new MockRedis()
         const sendMessage = vi.fn().mockResolvedValue(1)
 
-        const providerFactory = {
-            withSession: vi.fn().mockImplementation(async (_session: string, fn: (provider: { sendMessage: typeof sendMessage }) => Promise<void>) => {
+        const sessionPool = {
+            registerProject: vi.fn(),
+            withProject: vi.fn().mockImplementation(async (_project: Project, _session: string, fn: (provider: { sendMessage: typeof sendMessage }) => Promise<void>) => {
                 await fn({ sendMessage })
             }),
         }
 
         const service = new WarmupService(
-            providerFactory as never,
+            sessionPool as never,
             redis as never,
             encryptionService,
             masterKey,
@@ -130,12 +131,13 @@ describe('WarmupService', () => {
         const masterKey = Buffer.from('b'.repeat(64), 'hex')
         const redis = new MockRedis()
 
-        const providerFactory = {
-            withSession: vi.fn(),
+        const sessionPool = {
+            registerProject: vi.fn(),
+            withProject: vi.fn(),
         }
 
         const service = new WarmupService(
-            providerFactory as never,
+            sessionPool as never,
             redis as never,
             encryptionService,
             masterKey,

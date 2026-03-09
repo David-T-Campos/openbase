@@ -138,3 +138,7 @@ export function getConfig(): Config {
     }
     return _config
 }
+
+export function resetConfig(): void {
+    _config = null
+}

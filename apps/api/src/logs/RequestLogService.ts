@@ -1,14 +1,5 @@
 import type Redis from 'ioredis'
-
-export interface RequestLogEntry {
-    id: string
-    method: string
-    path: string
-    projectId: string
-    statusCode: number
-    durationMs: number
-    timestamp: string
-}
+import type { RequestLogEntry } from '@openbase/core'
 
 export class RequestLogService {
     constructor(private redis: Redis) { }

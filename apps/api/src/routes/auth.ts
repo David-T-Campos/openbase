@@ -81,7 +81,7 @@ export function registerAuthRoutes(
                     body.metadata
                 )
 
-                return reply.status(201).send(result)
+                return reply.status(201).send({ data: result })
             })
         }
     )
@@ -105,13 +105,15 @@ export function registerAuthRoutes(
 
                 if ('mfaRequired' in result) {
                     return reply.send({
+                        data: {
                         mfa_required: true,
                         challenge_token: result.challengeToken,
                         user: result.user,
+                        },
                     })
                 }
 
-                return reply.send(result)
+                return reply.send({ data: result })
             })
         }
     )

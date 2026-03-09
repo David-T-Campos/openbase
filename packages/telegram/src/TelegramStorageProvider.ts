@@ -33,6 +33,16 @@ const FILE_MANIFEST = '__MANIFEST__'
 
 type ChannelInput = TelegramChannelRef | string
 
+interface MessageSubscription {
+    channels: ChannelInput[]
+    handler: (channelId: string, messageId: number, text: string) => void
+}
+
+interface DeleteSubscription {
+    channels: ChannelInput[]
+    handler: (channelId: string, messageIds: number[]) => void
+}
+
 /**
  * Telegram-backed implementation of the StorageProvider interface.
  * Uses private channels as "tables" and messages as "rows".
@@ -43,6 +53,9 @@ export class TelegramStorageProvider implements EventedStorageProvider {
     private connected = false
     private readonly apiId: number
     private readonly apiHash: string
+    private readonly newMessageSubscriptions: MessageSubscription[] = []
+    private readonly editedMessageSubscriptions: MessageSubscription[] = []
+    private readonly deletedMessageSubscriptions: DeleteSubscription[] = []
 
     constructor(apiId: number, apiHash: string) {
         this.apiId = apiId
@@ -51,6 +64,10 @@ export class TelegramStorageProvider implements EventedStorageProvider {
 
     /** Connect to Telegram using a saved session string */
     async connect(sessionString: string): Promise<void> {
+        if (this.connected) {
+            return
+        }
+
         this.session = new StringSession(sessionString)
         const baseLogger = new Logger(LogLevel.NONE)
         this.client = new TelegramClient(this.session, this.apiId, this.apiHash, {
@@ -73,6 +90,7 @@ export class TelegramStorageProvider implements EventedStorageProvider {
         }
 
         this.connected = true
+        this.attachStoredHandlers()
     }
 
     /** Disconnect from Telegram */
@@ -343,20 +361,8 @@ export class TelegramStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageId: number, text: string) => void
     ): void {
         this.requireConnected()
-        const channelIds = channels.map(channel => this.getChannelId(channel))
-        this.client.addEventHandler(
-            (event: { message?: Api.Message }) => {
-                const message = event.message
-                if (!message || !message.peerId) return
-
-                const peerId = message.peerId as Api.PeerChannel
-                const channelId = String(peerId.channelId)
-                if (channelIds.includes(channelId)) {
-                    handler(channelId, message.id, message.text || '')
-                }
-            },
-            new NewMessage({})
-        )
+        this.newMessageSubscriptions.push({ channels, handler })
+        this.attachNewMessageHandler(channels, handler)
     }
 
     /** Add an event handler for edited messages. */
@@ -365,20 +371,8 @@ export class TelegramStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageId: number, text: string) => void
     ): void {
         this.requireConnected()
-        const channelIds = channels.map(channel => this.getChannelId(channel))
-        this.client.addEventHandler(
-            (event: { message?: Api.Message }) => {
-                const message = event.message
-                if (!message || !message.peerId) return
-
-                const peerId = message.peerId as Api.PeerChannel
-                const channelId = String(peerId.channelId)
-                if (channelIds.includes(channelId)) {
-                    handler(channelId, message.id, message.text || '')
-                }
-            },
-            new EditedMessage({})
-        )
+        this.editedMessageSubscriptions.push({ channels, handler })
+        this.attachEditedMessageHandler(channels, handler)
     }
 
     /** Add an event handler for deleted messages. */
@@ -387,19 +381,8 @@ export class TelegramStorageProvider implements EventedStorageProvider {
         handler: (channelId: string, messageIds: number[]) => void
     ): void {
         this.requireConnected()
-        const channelIds = channels.map(channel => this.getChannelId(channel))
-        this.client.addEventHandler(
-            (event: { deletedIds?: number[]; peer?: Api.TypePeer }) => {
-                const peer = event.peer as Api.PeerChannel | undefined
-                if (!peer || !event.deletedIds?.length) return
-
-                const channelId = String(peer.channelId)
-                if (channelIds.includes(channelId)) {
-                    handler(channelId, event.deletedIds)
-                }
-            },
-            new DeletedMessage({})
-        )
+        this.deletedMessageSubscriptions.push({ channels, handler })
+        this.attachDeletedMessageHandler(channels, handler)
     }
 
     /** Get the current session string (for saving) */
@@ -472,6 +455,79 @@ export class TelegramStorageProvider implements EventedStorageProvider {
 
     private getChannelId(channel: ChannelInput): string {
         return typeof channel === 'string' ? channel : channel.id
+    }
+
+    private attachStoredHandlers(): void {
+        for (const subscription of this.newMessageSubscriptions) {
+            this.attachNewMessageHandler(subscription.channels, subscription.handler)
+        }
+
+        for (const subscription of this.editedMessageSubscriptions) {
+            this.attachEditedMessageHandler(subscription.channels, subscription.handler)
+        }
+
+        for (const subscription of this.deletedMessageSubscriptions) {
+            this.attachDeletedMessageHandler(subscription.channels, subscription.handler)
+        }
+    }
+
+    private attachNewMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageId: number, text: string) => void
+    ): void {
+        const channelIds = channels.map(channel => this.getChannelId(channel))
+        this.client.addEventHandler(
+            (event: { message?: Api.Message }) => {
+                const message = event.message
+                if (!message || !message.peerId) return
+
+                const peerId = message.peerId as Api.PeerChannel
+                const channelId = String(peerId.channelId)
+                if (channelIds.includes(channelId)) {
+                    handler(channelId, message.id, message.text || '')
+                }
+            },
+            new NewMessage({})
+        )
+    }
+
+    private attachEditedMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageId: number, text: string) => void
+    ): void {
+        const channelIds = channels.map(channel => this.getChannelId(channel))
+        this.client.addEventHandler(
+            (event: { message?: Api.Message }) => {
+                const message = event.message
+                if (!message || !message.peerId) return
+
+                const peerId = message.peerId as Api.PeerChannel
+                const channelId = String(peerId.channelId)
+                if (channelIds.includes(channelId)) {
+                    handler(channelId, message.id, message.text || '')
+                }
+            },
+            new EditedMessage({})
+        )
+    }
+
+    private attachDeletedMessageHandler(
+        channels: ChannelInput[],
+        handler: (channelId: string, messageIds: number[]) => void
+    ): void {
+        const channelIds = channels.map(channel => this.getChannelId(channel))
+        this.client.addEventHandler(
+            (event: { deletedIds?: number[]; peer?: Api.TypePeer }) => {
+                const peer = event.peer as Api.PeerChannel | undefined
+                if (!peer || !event.deletedIds?.length) return
+
+                const channelId = String(peer.channelId)
+                if (channelIds.includes(channelId)) {
+                    handler(channelId, event.deletedIds)
+                }
+            },
+            new DeletedMessage({})
+        )
     }
 
     private toTimestamp(value: Date | number | undefined): number {

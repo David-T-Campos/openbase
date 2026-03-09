@@ -4,8 +4,9 @@ import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { ArrowLeft, ArrowRight, KeyRound, ShieldCheck } from 'lucide-react'
+import { authResultSchema } from '@openbase/core'
 import { AppLogo } from '../../components/AppLogo'
-import { setPlatformSession } from '../../lib/platformApi'
+import { readApiEnvelope, setPlatformSession } from '../../lib/platformApi'
 
 export default function LoginPage() {
     const router = useRouter()
@@ -28,13 +29,9 @@ export default function LoginPage() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),
             })
-            const data = await res.json()
 
-            if (!res.ok) {
-                throw new Error(data.error?.message || 'Authentication failed')
-            }
-
-            setPlatformSession(data.session || {})
+            const result = await readApiEnvelope(res, authResultSchema)
+            setPlatformSession(result.session)
             router.push('/dashboard')
         } catch (err) {
             setError((err as Error).message)

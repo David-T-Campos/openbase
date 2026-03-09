@@ -21,11 +21,14 @@ export class TelegramProviderFactory {
         }
     }
 
-    async createConnectedProvider(sessionString: string): Promise<EventedStorageProvider> {
-        const provider = this.useMock
+    createProvider(): EventedStorageProvider {
+        return this.useMock
             ? new MockStorageProvider()
             : new TelegramStorageProvider(this.requireApiId(), this.requireApiHash())
+    }
 
+    async createConnectedProvider(sessionString: string): Promise<EventedStorageProvider> {
+        const provider = this.createProvider()
         await provider.connect(sessionString)
         return provider
     }

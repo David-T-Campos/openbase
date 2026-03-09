@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowRight, FolderPlus, LogOut, Plus, Server } from 'lucide-react'
+import { ArrowRight, FolderPlus, LogOut, Plus, Server, ActivitySquare } from 'lucide-react'
 import { AppLogo } from '../../components/AppLogo'
 import { authenticatedFetch, hasPlatformSession, signOutPlatform } from '../../lib/platformApi'
 
@@ -97,10 +97,16 @@ export default function DashboardPage() {
                             Create, inspect, and operate OpenBase projects from one console.
                         </p>
                     </div>
-                    <Link href="/dashboard/new" className="btn btn-primary">
-                        <Plus className="h-4 w-4" />
-                        New project
-                    </Link>
+                    <div className="flex flex-wrap gap-3">
+                        <Link href="/dashboard/operations" className="btn btn-secondary">
+                            <ActivitySquare className="h-4 w-4" />
+                            Operations room
+                        </Link>
+                        <Link href="/dashboard/new" className="btn btn-primary">
+                            <Plus className="h-4 w-4" />
+                            New project
+                        </Link>
+                    </div>
                 </div>
 
                 <section className="panel mt-6 p-6">
